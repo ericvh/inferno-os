@@ -86,8 +86,8 @@ extern void	pthread_jit_write_protect_np(int);
 #else
 #define	MAP_ANONYMOUS	0x20
 #define	JITMAPFLAGS	(MAP_PRIVATE|MAP_ANONYMOUS)
-#define	JITLOWHINT	((void*)0x20000000UL)
-#define	JITLOWLIMIT	0x80000000UL		/* keep code below 2GB */
+#define	JITLOWHINT	nil		/* jump tables are offsets (TABPC): no low arena needed */
+#define	JITLOWLIMIT	(~0UL)
 #define	jitwritable(on)
 #endif
 
@@ -98,7 +98,7 @@ ulong	jitarenasize = 64*1024*1024;	/* native kernel shrinks this (256MB RAM) */
 #ifdef __APPLE__
 int	jitsinglearena = 1;		/* MAP_JIT arenas need not be adjacent: keep [jitlo,jithi) one region */
 #else
-int	jitsinglearena;			/* never open a second arena (native kernel) */
+int	jitsinglearena = 1;		/* arenas may now land anywhere, so never leave a gap in [jitlo,jithi) */
 #endif
 
 static void*
