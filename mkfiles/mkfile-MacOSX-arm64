@@ -1,0 +1,32 @@
+TARGMODEL=	Posix
+TARGSHTYPE=	sh
+CPUS=		arm64
+ARCH=-arch arm64
+
+O=		o
+OS=		o
+
+AR=		ar
+ARFLAGS=	ruvs
+
+AS=		cc $ARCH -c
+ASFLAGS=
+
+CC=		cc $ARCH -c
+CFLAGS= $ARCH \
+        -g\
+		-O\
+		-Wno-deprecated-declarations -Wuninitialized -Wunused -Wreturn-type -Wimplicit\
+		-I$ROOT/MacOSX/$CPUS/include\
+		-I$ROOT/include\
+ 		-I/usr/X11R6/include\
+		-DMACOSX_ARM64 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-function-pointer-types -Wno-error=implicit-int -fno-stack-protector\
+		-fms-extensions -Wno-microsoft-anon-tag
+
+ANSICPP=
+LD=		cc $ARCH
+LDFLAGS=	-L/usr/X11R6/lib
+
+SYSLIBS=-lm
+YACC=		iyacc
+YFLAGS=		-d

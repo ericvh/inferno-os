@@ -224,6 +224,7 @@ typedef struct DigestState SHA512state;
 
 DigestState* md4(uchar*, ulong, uchar*, DigestState*);
 DigestState* md5(uchar*, ulong, uchar*, DigestState*);
+DigestState* poly1305(uchar*, ulong, uchar*, ulong, uchar*, DigestState*);
 DigestState* sha1(uchar*, ulong, uchar*, DigestState*);
 DigestState* sha224(uchar*, ulong, uchar*, DigestState*);
 DigestState* sha256(uchar*, ulong, uchar*, DigestState*);

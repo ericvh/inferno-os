@@ -3,7 +3,7 @@
 #include "interp.h"
 #include "error.h"
 
-#if defined(LINUX_AMD64) || defined(LINUX_ARM64)
+#if defined(LINUX_AMD64) || defined(LINUX_ARM64) || defined(MACOSX_ARM64)
 #include "sys/mman.h"
 #endif
 
@@ -372,6 +372,9 @@ dopoolalloc(Pool *p, uintptr asize, uintptr pc)
 	p->nbrk++;
 #if defined(LINUX_AMD64)  || defined(LINUX_ARM64)
 	t = (Bhdr *) mmap(0, alloc, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+#elif defined(MACOSX_ARM64)
+	/* macOS arm64 refuses RWX mappings without MAP_JIT; pool memory need not be executable */
+	t = (Bhdr *) mmap(0, alloc, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
 #else
 	t = (Bhdr *)sbrk(alloc);
 #endif

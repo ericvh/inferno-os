@@ -10,6 +10,17 @@
  *	enable and check inline FP code (not much point with fpemu)
  */
 
+#ifdef MACOSX_ARM64
+extern void*	jitmalloc(ulong);
+extern void	jitwritable(int);
+#define	JITALLOC(n)	jitmalloc(n)
+#define	JITFREE(p)	/* bump allocator */
+#else
+#define	JITALLOC(n)	mallocz(n, 0)
+#define	JITFREE(p)	free(p)
+#define	jitwritable(on)
+#endif
+
 #define	RESCHED 1	/* check for interpreter reschedule */
 #define	SOFTFP	1
 
@@ -1923,7 +1934,7 @@ preamble(void)
 	if(comvec)
 		return;
 
-	comvec = malloc(10 * sizeof(*code));
+	comvec = JITALLOC(10 * sizeof(*code));
 	if(comvec == nil)
 		error(exNomem);
 	code = (uint*)comvec;
@@ -2282,7 +2293,7 @@ typecom(Type *t)
 	free(tmp);
 
 	n *= sizeof(*code);
-	code = mallocz(n, 0);
+	code = JITALLOC(n);
 	if(code == nil)
 		return;
 
@@ -2325,6 +2336,7 @@ compile(Module *m, int size, Modlink *ml)
 	int i, n;
 	uint *s, *tmp;
 
+	jitwritable(1);
 	base = nil;
 	patch = mallocz(size*sizeof(*patch), 0);
 	tinit = malloc(m->ntype*sizeof(*tinit));
@@ -2358,7 +2370,7 @@ compile(Module *m, int size, Modlink *ml)
 	flushcon(0);
 	n += code - tmp;
 
-	base = mallocz(n*sizeof(*code)+nlit*sizeof(ulong), 0);
+	base = JITALLOC(n*sizeof(*code)+nlit*sizeof(ulong));
 	if(base == nil)
 		goto bad;
 
@@ -2431,11 +2443,13 @@ compile(Module *m, int size, Modlink *ml)
 	m->prog = (Inst*)base;
 	m->compiled = 1;
 	segflush(base, n*sizeof(*base));
+	jitwritable(0);
 	return 1;
 bad:
 	free(patch);
 	free(tinit);
-	free(base);
+	JITFREE(base);
+	jitwritable(0);
 	free(tmp);
 	return 0;
 }
