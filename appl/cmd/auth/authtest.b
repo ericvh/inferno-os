@@ -112,10 +112,11 @@ run(keyalg, what: string, cli, srv: ref Keyring->Authinfo, alg: string, algs: li
 	done := chan of string;
 	spawn server(algs, srv, fds[0], done);
 	fds[0] = nil;
+	# the client's end stays open until the server has finished: a write
+	# to a closed pipe raises an exception, which is not what is tested here
 	cauth := load Auth Auth->PATH;
 	cauth->init();
 	(fd, err) := cauth->client(alg, cli, fds[1]);
-	fds[1] = nil;
 	got := "";
 	if(fd != nil){
 		msg := array of byte ("hello from the client, over " + what);
@@ -127,9 +128,9 @@ run(keyalg, what: string, cli, srv: ref Keyring->Authinfo, alg: string, algs: li
 			if(n != len msg + 3 || string buf[0:3] != "re:" || string buf[3:n] != string msg)
 				got = "wrong reply";
 		}
-		fd = nil;
 	}
 	sres := <-done;
+	fds[1] = nil;
 	if(want != nil){
 		if(err != "srv" || got != nil || sres != "ok " + want){
 			sys->print("FAIL %s: %s: client %q %q, server %q\n", keyalg, what, err, got, sres);
@@ -137,6 +138,7 @@ run(keyalg, what: string, cli, srv: ref Keyring->Authinfo, alg: string, algs: li
 			return;
 		}
 	}else if(fd != nil || len sres >= 3 && sres[0:3] == "ok "){
+		fd = nil;
 		sys->print("FAIL %s: %s: should have been refused\n", keyalg, what);
 		nfail++;
 		return;
@@ -152,7 +154,6 @@ server(algs: list of string, ai: ref Keyring->Authinfo, fd: ref Sys->FD, done: c
 	sauth := load Auth Auth->PATH;
 	sauth->init();
 	(nfd, id) := sauth->server(algs, ai, fd, 0);
-	fd = nil;
 	if(nfd == nil){
 		done <-= "refused: " + id;
 		return;

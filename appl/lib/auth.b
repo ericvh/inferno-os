@@ -210,16 +210,25 @@ senderrmsg(fd: ref Sys->FD, e: string)
 	write(fd, b);
 }
 
-# a write to a pipe whose other end has gone raises an exception
+# A write to a pipe whose other end has gone raises an exception as well
+# as failing. (Compiled code, emu -c1, can miss the handler: its search
+# has no program counter for a function that is inside a built-in call.)
+write0(fd: ref Sys->FD, b: array of byte): int
+{
+	return sys->write(fd, b, len b);
+}
+
 write(fd: ref Sys->FD, b: array of byte): int
 {
+	n := -1;
 	{
-		return sys->write(fd, b, len b);
+		n = write0(fd, b);
 	}exception{
 	"write on closed pipe" =>
 		sys->werrstr("write on closed pipe");
-		return -1;
+		n = -1;
 	}
+	return n;
 }
 
 getmsg(fd: ref Sys->FD): array of byte
@@ -572,14 +581,9 @@ client1(alg: string, ai: ref Keyring->Authinfo, fd: ref Sys->FD): (ref Sys->FD, 
 	id_or_err: string;
 	secret: array of byte;
 	{
-		(id_or_err, secret) = kr->auth(fd, ai, 0);
+		(id_or_err, secret) = auth1c(fd, ai, alg);
 		if(secret == nil)
 			return (nil, id_or_err);
-
-		# send algorithm
-		buf := array of byte alg;
-		if(kr->sendmsg(fd, buf, len buf) < 0)
-			return (nil, sys->sprint("can't send ssl algorithm: %r"));
 	}exception{
 	"write on closed pipe" =>
 		# the server gave its reason, if it had one, before it went
@@ -593,6 +597,19 @@ client1(alg: string, ai: ref Keyring->Authinfo, fd: ref Sys->FD): (ref Sys->FD, 
 		return (fd, id_or_err);
 
 	return push(fd, secret, secret, alg, id_or_err);
+}
+
+# Keyring's auth and the client's choice of algorithm; in a function
+# of its own so that client1 can catch a closed pipe (see write0)
+auth1c(fd: ref Sys->FD, ai: ref Keyring->Authinfo, alg: string): (string, array of byte)
+{
+	(id_or_err, secret) := kr->auth(fd, ai, 0);
+	if(secret == nil)
+		return (id_or_err, nil);
+	buf := array of byte alg;
+	if(kr->sendmsg(fd, buf, len buf) < 0)
+		return (sys->sprint("can't send ssl algorithm: %r"), nil);
+	return (id_or_err, secret);
 }
 
 # the server's side once the client's "1" has been read
