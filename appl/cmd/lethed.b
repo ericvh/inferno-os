@@ -55,7 +55,7 @@ Rrefs:	con 16r20;	# in a grant: this server takes ticket references
 Rpq:	con 16r40;	# in a ticket: it came from the hybrid exchange
 
 # kinds of proof
-Kkey, Kcert, Khkey, Khcert: con iota;
+Kkey, Kcert, Khkey, Khcert, Kgocert: con iota;	# Kgocert is ours: kind 1 in Purgatorio-Go's Tauth2
 
 Noncelen:	con 24;
 Taglen:	con 16;
@@ -899,7 +899,7 @@ siglen(kind: int): int
 	case kind {
 	Kkey or Kcert =>
 		return Edsiglen;
-	Khkey or Khcert =>
+	Khkey or Khcert or Kgocert =>
 		return Hybsiglen;
 	}
 	return -1;
@@ -950,11 +950,14 @@ keyfileid(name: string): string
 }
 
 # idof parses one id of a key list: 64 hex digits, perhaps after mldsa65:
+# (a hybrid key's id as Purgatorio writes it) or pq: (as Purgatorio-Go does)
 idof(s: string): string
 {
 	h := s;
 	if(len s > 8 && s[0:8] == "mldsa65:")
 		h = s[8:];
+	else if(len s > 3 && s[0:3] == "pq:")
+		h = s[3:];
 	if(unhex(h, 32) == nil)
 		return nil;
 	return s;
@@ -1011,6 +1014,20 @@ trust(uname: string): ref Trust
 	return t;
 }
 
+# haskey says whether a list names key. An Ed25519 key is listed by its
+# hex. A hybrid key is listed by a fingerprint behind a marker, of which
+# there are two: mldsa65: and SHA-256("pghybrid1 key" 0 || key), or pq:
+# and SHA-256("pgkey2" 0 || key). Either way an entry has a kind, and a
+# hybrid entry is never matched by an Ed25519 key.
+haskey(l: list of string, key: array of byte): int
+{
+	if(has(l, keyid(key)))
+		return 1;
+	if(len key == Hybkeylen)
+		return has(l, "pq:"+hex(sha256(cat(array of byte "pgkey2", cat(array[1] of {byte 0}, key)))));
+	return 0;
+}
+
 has(l: list of string, s: string): int
 {
 	for(; l != nil; l = tl l)
@@ -1036,20 +1053,34 @@ validname(s: string): int
 #	pgcert2 <name> mldsa65:<key> <expires> mldsa65:<signer>:<signature> ...
 # A pgcert1 has Ed25519 keys and signatures throughout and at most 8
 # signatures; a pgcert2 has hybrid ones, each key written whole, and at
-# most 4. It is strict: the line must be what the encoder writes.
-parsecert(b: array of byte, hybrid: int): ref Cert
+# most 4. Purgatorio-Go writes a pgcert2 of its own (form Cgo): the same
+# fields and the same signed body, but in unpadded base64url with no
+# markers, and at most 8 signatures:
+#	pgcert2 <name> <key> <expires> <signer>:<signature> ...
+# It is strict: the line must be what the encoder writes.
+C1, C2, Cgo: con iota;
+parsecert(b: array of byte, form: int): ref Cert
 {
 	tag := "pgcert1";
 	mark := "";
 	klen := 32;
 	slen := Edsiglen;
 	maxsig := 8;
-	if(hybrid){
+	if(form != C1){
 		tag = "pgcert2";
-		mark = "mldsa65:";
 		klen = Hybkeylen;
 		slen = Hybsiglen;
+	}
+	if(form == C2){
+		mark = "mldsa65:";
 		maxsig = 4;
+	}
+	# the lengths of a key and a signature in text
+	kt := 2*klen;
+	st := 2*slen;
+	if(form == Cgo){
+		kt = (klen*4+2)/3;
+		st = (slen*4+2)/3;
 	}
 	if(len b > 0 && b[len b-1] == byte '\n')
 		b = b[0:len b-1];
@@ -1073,7 +1104,7 @@ parsecert(b: array of byte, hybrid: int): ref Cert
 	if(!validname(c.name))
 		return nil;
 	words = tl words;
-	c.key = unhex(unmark(hd words, mark), klen);
+	c.key = untext(unmark(hd words, mark), klen, form);
 	if(c.key == nil)
 		return nil;
 	words = tl words;
@@ -1089,10 +1120,10 @@ parsecert(b: array of byte, hybrid: int): ref Cert
 	sl: list of (array of byte, array of byte);
 	for(words = tl words; words != nil; words = tl words){
 		s := unmark(hd words, mark);
-		if(len s != 2*klen+1+2*slen || s[2*klen] != ':')
+		if(len s != kt+1+st || s[kt] != ':')
 			return nil;
-		signer := unhex(s[0:2*klen], klen);
-		sig := unhex(s[2*klen+1:], slen);
+		signer := untext(s[0:kt], klen, form);
+		sig := untext(s[kt+1:], slen, form);
 		if(signer == nil || sig == nil)
 			return nil;
 		for(t := sl; t != nil; t = tl t){
@@ -1104,6 +1135,48 @@ parsecert(b: array of byte, hybrid: int): ref Cert
 	}
 	c.signers = sl;
 	return c;
+}
+
+# untext decodes n bytes written in hex or, for Purgatorio-Go's
+# certificates, in unpadded base64url; nil unless s is exactly that
+untext(s: string, n: int, form: int): array of byte
+{
+	if(form != Cgo)
+		return unhex(s, n);
+	if(len s != (n*4+2)/3)
+		return nil;
+	a := array[n] of byte;
+	o := 0;
+	acc := 0;
+	bits := 0;
+	for(i := 0; i < len s; i++){
+		c := s[i];
+		v: int;
+		if(c >= 'A' && c <= 'Z')
+			v = c-'A';
+		else if(c >= 'a' && c <= 'z')
+			v = c-'a'+26;
+		else if(c >= '0' && c <= '9')
+			v = c-'0'+52;
+		else if(c == '-')
+			v = 62;
+		else if(c == '_')
+			v = 63;
+		else
+			return nil;
+		acc = ((acc<<6)|v) & 16rffff;
+		bits += 6;
+		if(bits >= 8){
+			bits -= 8;
+			if(o >= n)
+				return nil;
+			a[o++] = byte (acc>>bits);
+		}
+	}
+	# the bits left over must be zero, as a strict decoder wants
+	if(o != n || (acc & ((1<<bits)-1)) != 0)
+		return nil;
+	return a;
 }
 
 # unmark removes the marker a hybrid key carries in text; a word without
@@ -1138,10 +1211,9 @@ certbody(c: ref Cert): array of byte
 # checkcert says whether the trust takes c for uname: nil, or the error
 checkcert(t: ref Trust, c: ref Cert, uname: string): string
 {
-	id := keyid(c.key);
-	if(t.damaged || has(t.revoked, id))
+	if(t.damaged || haskey(t.revoked, c.key))
 		return Erevoked;
-	if(has(t.keys, id))
+	if(haskey(t.keys, c.key))
 		return nil;
 	if(uname != c.name)
 		return "certificate name mismatch";
@@ -1152,9 +1224,8 @@ checkcert(t: ref Trust, c: ref Cert, uname: string): string
 	revoked := 0;
 	for(l := c.signers; l != nil; l = tl l){
 		(signer, sig) := hd l;
-		sid := keyid(signer);
-		if(has(t.signers, sid) && sigverify(signer, body, sig)){
-			if(!has(t.revoked, sid))
+		if(haskey(t.signers, signer) && sigverify(signer, body, sig)){
+			if(!haskey(t.revoked, signer))
 				return nil;
 			revoked = 1;
 		}
@@ -1176,14 +1247,13 @@ checkproof(t: ref Trust, kind: int, body, sig, signed: array of byte, uname: str
 			return Efailed;
 		if(needpqsig && kind == Kkey)
 			return "post-quantum signature required";
-		id := keyid(body);
-		if(!has(t.keys, id) || !sigverify(body, signed, sig))
+		if(!haskey(t.keys, body) || !sigverify(body, signed, sig))
 			return Efailed;
-		if(has(t.revoked, id))
+		if(haskey(t.revoked, body))
 			return Erevoked;
 		return nil;
 	Kcert =>
-		c := parsecert(body, 0);
+		c := parsecert(body, C1);
 		if(c == nil)
 			return Efailed;
 		if(needpqsig)
@@ -1191,8 +1261,11 @@ checkproof(t: ref Trust, kind: int, body, sig, signed: array of byte, uname: str
 		if(!sigverify(c.key, signed, sig))
 			return Efailed;
 		return checkcert(t, c, uname);
-	Khcert =>
-		c := parsecert(body, 1);
+	Khcert or Kgocert =>
+		form := C2;
+		if(kind == Kgocert)
+			form = Cgo;
+		c := parsecert(body, form);
 		if(c == nil || !sigverify(c.key, signed, sig))
 			return Efailed;
 		return checkcert(t, c, uname);
@@ -1242,6 +1315,20 @@ auth(hybrid: int, id: int, b: array of byte): (array of byte, string)
 	body := b[o:o+n];
 	o += n;
 	sig := b[o:];
+	# Purgatorio-Go's Tauth2 has the same fields but counts its kinds from
+	# the hybrid key (0 a hybrid key, 1 its pgcert2) and gives the signature
+	# a length. The two layouts cannot be confused: with kind 0 or 1 ours
+	# ends in a 64-byte signature and Go's in a counted 3,373-byte one, and
+	# the kind byte and the body are under the signature in both.
+	if(kind > Khcert)
+		return (nil, Efailed);
+	if(hybrid && (kind == Kkey || kind == Kcert) && len sig == 2+Hybsiglen && g16(sig, 0) == Hybsiglen){
+		sig = sig[2:];
+		if(kind == Kkey)
+			kind = Khkey;
+		else
+			kind = Kgocert;
+	}
 	if(siglen(kind) >= 0 && len sig != siglen(kind) || siglen(kind) < 0 && len sig != Edsiglen && len sig != Hybsiglen)
 		return (nil, Ebadmsg);
 	(okp, nil) := split(prefix);
