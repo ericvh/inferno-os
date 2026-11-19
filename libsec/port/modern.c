@@ -20,6 +20,47 @@ x25519base(uchar *out, uchar *secret)
 	crypto_x25519_public_key(out, secret);
 }
 
+/*
+ * Elligator 2 for Curve25519, as map_to_curve_elligator2_curve25519 of
+ * RFC 9380 gives the u-coordinate: fe is a field element in 32 bytes,
+ * little-endian, its top bit ignored and the rest taken modulo 2^255-19.
+ * Monocypher's map takes an element below 2^254; fe and -fe map to the
+ * same point, so one of them is always in its range. Used by CPace.
+ */
+void
+x25519map(uchar *out, uchar *fe)
+{
+	uchar r[32], n[32];
+	int i, c, big;
+	uint mask;
+
+	memmove(r, fe, 32);
+	r[31] &= 0x7f;
+	/* r >= p happens for 19 values only; not worth hiding */
+	big = r[31] == 0x7f && r[0] >= 0xed;
+	for(i = 1; big && i < 31; i++)
+		big = r[i] == 0xff;
+	if(big){
+		r[0] -= 0xed;
+		memset(r+1, 0, 31);
+	}
+	/* n = p - r, and take it if r has bit 254 set, without branching on r */
+	c = 0xed - r[0];
+	n[0] = c;
+	c >>= 8;
+	for(i = 1; i < 32; i++){
+		c = (i == 31? 0x7f: 0xff) - r[i] + c;
+		n[i] = c;
+		c >>= 8;
+	}
+	mask = -(uint)((r[31] >> 6) & 1);
+	for(i = 0; i < 32; i++)
+		r[i] ^= mask & (r[i] ^ n[i]);
+	crypto_elligator_map(out, r);
+	crypto_wipe(r, sizeof r);
+	crypto_wipe(n, sizeof n);
+}
+
 /* pub is the 32-byte public key of the 32-byte seed */
 void
 ed25519pub(uchar *pub, uchar *seed)
