@@ -1645,3 +1645,116 @@ Crypt_mlkem768decap(void *fp)
 	*f->ret = mem2array(ss, sizeof ss);
 	memset(ss, 0, sizeof ss);
 }
+
+/*
+ * ML-DSA-65. The work is done on copies with the interpreter released,
+ * since signing takes milliseconds.
+ */
+/* nil if there is no memory */
+static uchar*
+copybytes(Array *a, int *n)
+{
+	uchar *p;
+
+	*n = 0;
+	if(a != H)
+		*n = a->len;
+	p = malloc(*n + 1);
+	if(p != nil && *n != 0)
+		memmove(p, a->data, *n);
+	return p;
+}
+
+void
+Crypt_mldsa65pub(void *fp)
+{
+	F_Crypt_mldsa65pub *f;
+	uchar *s, seed[MLDSA65seedlen], *pk;
+	Array **ret;
+
+	f = fp;
+	ret = f->ret;
+	retarray(ret, H);
+	s = bytes(f->seed, MLDSA65seedlen);
+	if(s == nil)
+		return;
+	memmove(seed, s, sizeof seed);
+	pk = malloc(MLDSA65pklen);
+	if(pk == nil)
+		error(exHeap);
+	release();
+	mldsa65pub(pk, seed);
+	acquire();
+	memset(seed, 0, sizeof seed);
+	*ret = mem2array(pk, MLDSA65pklen);
+	free(pk);
+}
+
+void
+Crypt_mldsa65sign(void *fp)
+{
+	F_Crypt_mldsa65sign *f;
+	uchar *s, seed[MLDSA65seedlen], *msg, *ctx, *sig;
+	int nmsg, nctx, r;
+	Array **ret;
+
+	f = fp;
+	ret = f->ret;
+	retarray(ret, H);
+	s = bytes(f->seed, MLDSA65seedlen);
+	if(s == nil || f->ctx != H && f->ctx->len > 255)
+		return;
+	memmove(seed, s, sizeof seed);
+	msg = copybytes(f->msg, &nmsg);
+	ctx = copybytes(f->ctx, &nctx);
+	sig = malloc(MLDSA65siglen);
+	if(msg == nil || ctx == nil || sig == nil){
+		free(msg);
+		free(ctx);
+		free(sig);
+		error(exHeap);
+	}
+	release();
+	r = mldsa65sign(sig, seed, msg, nmsg, ctx, nctx);
+	acquire();
+	memset(seed, 0, sizeof seed);
+	if(r == 0)
+		*ret = mem2array(sig, MLDSA65siglen);
+	free(sig);
+	free(msg);
+	free(ctx);
+}
+
+void
+Crypt_mldsa65verify(void *fp)
+{
+	F_Crypt_mldsa65verify *f;
+	uchar *p, *pk, *sig, *msg, *ctx;
+	int nmsg, nctx, n, r, *ret;
+
+	f = fp;
+	ret = f->ret;
+	*ret = 0;
+	p = bytes(f->pk, MLDSA65pklen);
+	if(p == nil || bytes(f->sig, MLDSA65siglen) == nil || f->ctx != H && f->ctx->len > 255)
+		return;
+	pk = copybytes(f->pk, &n);
+	sig = copybytes(f->sig, &n);
+	msg = copybytes(f->msg, &nmsg);
+	ctx = copybytes(f->ctx, &nctx);
+	if(pk == nil || sig == nil || msg == nil || ctx == nil){
+		free(pk);
+		free(sig);
+		free(msg);
+		free(ctx);
+		error(exHeap);
+	}
+	release();
+	r = mldsa65verify(pk, msg, nmsg, ctx, nctx, sig);
+	acquire();
+	*ret = r;
+	free(pk);
+	free(sig);
+	free(msg);
+	free(ctx);
+}
