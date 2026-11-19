@@ -3,9 +3,19 @@
 lethefs, lethed \- stateless read-only file service (Lethe)
 .SH SYNOPSIS
 .B lethefs
-.B -A
 [
+.B -A
+] [
 .B -D
+] [
+.B -C
+.I kx
+] [
+.B -k
+.I seedfile
+] [
+.B -u
+.I user
 ]
 .I addr
 .I mtpt
@@ -51,16 +61,42 @@ Requests are answered as the user
 .BR none :
 a file must be readable, and each directory above it searchable, by others.
 .PP
-Only Lethe's clear mode is implemented, which has no authentication and no
-encryption, and
+By default
+.I lethefs
+authenticates and seals.
+It signs a request for a ticket with the Ed25519 key whose 32-byte seed is in
+.I seedfile
+(raw, or as 64 hexadecimal digits), as
+.I user
+(default: the contents of
+.BR /dev/user ),
+and the server must trust that key.
+The ticket's keys come from a hybrid exchange, X25519 with ML-KEM-768, so
+that recorded traffic stays closed to someone who later breaks X25519;
+.B "-C x25519"
+asks for the classical exchange instead.
+Every request and reply is then sealed with XChaCha20-Poly1305.
+The server is not authenticated.
+.PP
+With
+.B -A
+.I lethefs
+uses Lethe's clear mode instead, which has no authentication and no encryption.
+.I Lethed
+implements only the clear mode, and
 .B -A
 must be given to say so.
-Neither program falls back to it otherwise.
+Neither program falls back from one mode to the other.
 .SH SOURCE
 .B /appl/cmd/lethefs.b
 .br
 .B /appl/cmd/lethed.b
+.SH SEE ALSO
+.IR crypt (2)
 .SH BUGS
-No tickets, no sealing, and no caching in
-.IR lethefs :
-each Styx operation is one round trip or more.
+.I Lethed
+issues no tickets.
+.I Lethefs
+does not cache: each Styx operation is one round trip or more.
+It signs with a bare key only, not a certificate or a hybrid ML-DSA key,
+and does not send ticket references.
