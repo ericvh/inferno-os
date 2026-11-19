@@ -194,7 +194,7 @@ sendmsg(fd: ref Sys->FD, m: array of byte)
 	b := array[len h + len m] of byte;
 	b[0:] = h;
 	b[len h:] = m;
-	if(sys->write(fd, b, len b) != len b)
+	if(write(fd, b) != len b)
 		raise Remote+sys->sprint("remote: write error: %r");
 }
 
@@ -203,8 +203,23 @@ senderrmsg(fd: ref Sys->FD, e: string)
 	m := array of byte e;
 	if(len m > 255)
 		m = m[0:255];
-	sys->fprint(fd, "!%3.3d\n", len m);
-	sys->write(fd, m, len m);
+	h := array of byte sys->sprint("!%3.3d\n", len m);
+	b := array[len h + len m] of byte;
+	b[0:] = h;
+	b[len h:] = m;
+	write(fd, b);
+}
+
+# a write to a pipe whose other end has gone raises an exception
+write(fd: ref Sys->FD, b: array of byte): int
+{
+	{
+		return sys->write(fd, b, len b);
+	}exception{
+	"write on closed pipe" =>
+		sys->werrstr("write on closed pipe");
+		return -1;
+	}
 }
 
 getmsg(fd: ref Sys->FD): array of byte
@@ -554,14 +569,24 @@ client1(alg: string, ai: ref Keyring->Authinfo, fd: ref Sys->FD): (ref Sys->FD, 
 		alg = "none";
 
 	# mutual authentication
-	(id_or_err, secret) := kr->auth(fd, ai, 0);
-	if(secret == nil)
-		return (nil, id_or_err);
+	id_or_err: string;
+	secret: array of byte;
+	{
+		(id_or_err, secret) = kr->auth(fd, ai, 0);
+		if(secret == nil)
+			return (nil, id_or_err);
 
-	# send algorithm
-	buf := array of byte alg;
-	if(kr->sendmsg(fd, buf, len buf) < 0)
-		return (nil, sys->sprint("can't send ssl algorithm: %r"));
+		# send algorithm
+		buf := array of byte alg;
+		if(kr->sendmsg(fd, buf, len buf) < 0)
+			return (nil, sys->sprint("can't send ssl algorithm: %r"));
+	}exception{
+	"write on closed pipe" =>
+		# the server gave its reason, if it had one, before it went
+		if(id_or_err == nil)
+			id_or_err = "remote: hung up";
+		return (nil, id_or_err);
+	}
 
 	# don't push ssl if server supports no ssl connection
 	if(alg == "none")
