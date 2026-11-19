@@ -391,7 +391,7 @@ uchar	*readcert(char *filename, int *pcertlen);
 PEMChain *readcertchain(char *filename);
 
 /*
- * modern primitives (libsec/port/modern.c, mlkem768.c)
+ * modern primitives (libsec/port/modern.c, mlkem768.c, mldsa65.c)
  */
 enum
 {
@@ -406,6 +406,9 @@ enum
 	MLKEM768dklen=	2400,
 	MLKEM768ctlen=	1088,
 	MLKEM768sslen=	32,
+	MLDSA65seedlen=	32,
+	MLDSA65pklen=	1952,
+	MLDSA65siglen=	3309,
 };
 
 void	x25519(uchar *out, uchar *secret, uchar *point);
@@ -423,3 +426,7 @@ void	mlkem768encap(uchar *ct, uchar *ss, uchar *ek);
 void	mlkem768decap(uchar *ss, uchar *ct, uchar *dk);
 void	mlkem768keygenderand(uchar *ek, uchar *dk, uchar *coins);
 void	mlkem768encapderand(uchar *ct, uchar *ss, uchar *ek, uchar *coins);
+/* ML-DSA-65 (FIPS 204): keys are the 32-byte seed; signing is deterministic; ctx is at most 255 bytes */
+void	mldsa65pub(uchar *pk, uchar *seed);
+int	mldsa65sign(uchar *sig, uchar *seed, uchar *msg, ulong n, uchar *ctx, ulong nctx);
+int	mldsa65verify(uchar *pk, uchar *msg, ulong n, uchar *ctx, ulong nctx, uchar *sig);
