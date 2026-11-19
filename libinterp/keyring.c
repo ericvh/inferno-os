@@ -2127,6 +2127,7 @@ keyringmodinit(void)
 	extern SigAlgVec* rsainit(void);
 	extern SigAlgVec* dsainit(void);
 	extern SigAlgVec* ed25519init(void);
+	extern SigAlgVec* ed25519mldsa65init(void);
 
 	ipintsmodinit();	/* in case only Keyring is configured */
 	TSigAlg = dtype(freeSigAlg, sizeof(SigAlg), SigAlgmap, sizeof(SigAlgmap));
@@ -2164,6 +2165,8 @@ keyringmodinit(void)
 	if((sav = dsainit()) != nil)
 		algs[nalg++] = sav;
 	if((sav = ed25519init()) != nil)
+		algs[nalg++] = sav;
+	if((sav = ed25519mldsa65init()) != nil)
 		algs[nalg++] = sav;
 
 	fmtinstall('U', big64conv);
