@@ -1,12 +1,17 @@
 implement Lethefs;
 
 #
-# lethefs -A [-D] addr mtpt
+# lethefs [-A] [-D] [-C x25519] [-k seedfile] [-u user] addr mtpt
 #
 # A Lethe client (docs/lethe.md in Purgatorio, protocol lethe1): dials a
 # lethed, and presents its read-only tree at mtpt by serving Styx on a pipe.
 # The server keeps no state; the fid table Styx needs lives here.
-# Only the clear mode (-A, Tclear/Rclear) is implemented.
+#
+# With -A it uses the clear mode (Tclear/Rclear). Otherwise it authenticates
+# with the Ed25519 key whose 32-byte seed is in seedfile, gets a ticket from
+# the hybrid X25519 + ML-KEM-768 exchange (Tauth2), and seals every request
+# with XChaCha20-Poly1305. -C x25519 asks for the classical exchange (Tauth).
+# Neither mode falls back to the other.
 #
 
 include "sys.m";
@@ -19,6 +24,14 @@ include "dial.m";
 include "styx.m";
 	styx: Styx;
 	Tmsg, Rmsg: import styx;
+include "ipints.m";
+include "crypt.m";
+	crypt: Crypt;
+include "keyring.m";
+include "security.m";
+	random: Random;
+include "daytime.m";
+	daytime: Daytime;
 
 Lethefs: module
 {
@@ -26,9 +39,19 @@ Lethefs: module
 };
 
 # outer frame types
+Tauth:	con 1;
+Rauth:	con 2;
+Treq:	con 3;
+Rreq:	con 4;
 Rerror:	con 5;
 Tclear:	con 9;
 Rclear:	con 10;
+Tauth2:	con 11;
+Rauth2:	con 12;
+
+Rread:	con 1;	# rights
+Noncelen:	con 24;
+Taglen:	con 16;
 
 # inner ops
 OTstat:	con 16r10;
@@ -65,6 +88,15 @@ Fid: adt {
 fids: list of ref Fid;
 lfd: ref Sys->FD;	# the connection to lethed
 lid := 0;
+
+# the sealed mode's state: what an exchange gave
+clear := 0;
+classical := 0;	# -C x25519: ask for Tauth, not Tauth2
+seed: array of byte;	# the user's Ed25519 seed
+uname: string;
+ticket: array of byte;
+c2s, s2c: array of byte;
+skew := 0;	# the server's clock less ours, in seconds
 debug := 0;
 stderr: ref Sys->FD;
 
@@ -79,20 +111,38 @@ init(nil: ref Draw->Context, args: list of string)
 		fatal("cannot load modules");
 	styx->init();
 
-	clear := 0;
+	keyfile: string;
 	arg->init(args);
-	arg->setusage("lethefs -A [-D] addr mtpt");
+	arg->setusage("lethefs [-A] [-D] [-C x25519] [-k seedfile] [-u user] addr mtpt");
 	while((o := arg->opt()) != 0)
 		case o {
 		'A' =>	clear = 1;
 		'D' =>	debug = 1;
+		'k' =>	keyfile = arg->earg();
+		'u' =>	uname = arg->earg();
+		'C' =>
+			case arg->earg() {
+			"x25519" =>	classical = 1;
+			"x25519mlkem768" =>	classical = 0;
+			* =>	fatal("unknown key exchange");
+			}
 		* =>	arg->usage();
 		}
 	args = arg->argv();
 	if(len args != 2)
 		arg->usage();
-	if(!clear)
-		fatal("only the clear mode (-A) is implemented");
+	if(!clear){
+		if(keyfile == nil)
+			fatal("no key: give -k seedfile, or -A for the clear mode");
+		crypt = load Crypt Crypt->PATH;
+		random = load Random Random->PATH;
+		daytime = load Daytime Daytime->PATH;
+		if(crypt == nil || random == nil || daytime == nil)
+			fatal("cannot load crypto modules");
+		seed = readseed(keyfile);
+		if(uname == nil)
+			uname = readfile("/dev/user");
+	}
 	addr := dial->netmkaddr(hd args, "tcp", "5640");
 	mtpt := hd tl args;
 
@@ -101,7 +151,12 @@ init(nil: ref Draw->Context, args: list of string)
 		fatal(sys->sprint("dial %s: %r", addr));
 	lfd = c.dfd;
 
-	# fail now, not at the first walk, if the server refuses clear requests
+	if(!clear){
+		e := authenticate();
+		if(e != nil)
+			fatal(e);
+	}
+	# fail now, not at the first walk, if the server refuses us
 	(nil, err) := lstat("/");
 	if(err != nil)
 		fatal(err);
@@ -423,48 +478,279 @@ readn(fd: ref Sys->FD, a: array of byte): int
 	return n;
 }
 
+# exchange sends one frame and returns the reply's header and body
+exchange(typ: int, body: array of byte): (array of byte, array of byte, string)
+{
+	id := ++lid;
+	f := array[10+len body] of byte;
+	p32(f, 0, len f);
+	f[4] = byte 1;
+	f[5] = byte typ;
+	p32(f, 6, id);
+	f[10:] = body;
+	return send(f);
+}
+
+send(f: array of byte): (array of byte, array of byte, string)
+{
+	if(sys->write(lfd, f, len f) != len f)
+		return (nil, nil, sys->sprint("lethe write: %r"));
+	hdr := array[10] of byte;
+	if(readn(lfd, hdr) < 0)
+		return (nil, nil, "lethe: connection closed");
+	size := g32(hdr, 0);
+	if(size < 10 || size > Maxframe || int hdr[4] != 1 || g32(hdr, 6) != g32(f, 6))
+		return (nil, nil, Ebadmsg);
+	body := array[size-10] of byte;
+	if(readn(lfd, body) < 0)
+		return (nil, nil, "lethe: connection closed");
+	if(int hdr[5] == Rerror){
+		(e, o) := gstr(body, 0);
+		if(o != len body || e == nil)
+			return (nil, nil, Ebadmsg);
+		return (nil, nil, e);
+	}
+	return (hdr, body, nil);
+}
+
 # rpc sends one inner request (op and fields) and returns the inner reply
 # with the expected op, or the error string.
 rpc(req: array of byte, want: int): (array of byte, string)
 {
-	id := ++lid;
-	f := array[10+len req] of byte;
-	p32(f, 0, len f);
-	f[4] = byte 1;
-	f[5] = byte Tclear;
-	p32(f, 6, id);
-	f[10:] = req;
-	if(sys->write(lfd, f, len f) != len f)
-		return (nil, sys->sprint("lethe write: %r"));
-	hdr := array[10] of byte;
-	if(readn(lfd, hdr) < 0)
-		return (nil, "lethe: connection closed");
-	size := g32(hdr, 0);
-	if(size < 10 || size > Maxframe || int hdr[4] != 1 || g32(hdr, 6) != id)
+	reply: array of byte;
+	err: string;
+	if(clear){
+		hdr, body: array of byte;
+		(hdr, body, err) = exchange(Tclear, req);
+		if(err == nil && int hdr[5] != Rclear)
+			err = Ebadmsg;
+		reply = body;
+	}else{
+		(reply, err) = sealed(req);
+		case err {
+		"ticket expired" or "unknown ticket key" or "bad ticket" or "request expired" =>
+			# a new ticket (and a new reading of the server's clock), once
+			err = authenticate();
+			if(err == nil)
+				(reply, err) = sealed(req);
+		}
+	}
+	if(err != nil)
+		return (nil, err);
+	if(len reply < 1)
 		return (nil, Ebadmsg);
-	body := array[size-10] of byte;
-	if(readn(lfd, body) < 0)
-		return (nil, "lethe: connection closed");
-	case int hdr[5] {
-	Rerror =>
-		(e, o) := gstr(body, 0);
-		if(o != len body)
+	if(int reply[0] == ORerror){
+		(e, o) := gstr(reply, 1);
+		if(o != len reply || e == nil)
 			return (nil, Ebadmsg);
 		return (nil, e);
-	Rclear =>
-		if(len body < 1)
-			return (nil, Ebadmsg);
-		if(int body[0] == ORerror){
-			(e, o) := gstr(body, 1);
-			if(o != len body)
-				return (nil, Ebadmsg);
-			return (nil, e);
-		}
-		if(int body[0] != want)
-			return (nil, Ebadmsg);
-		return (body[1:], nil);
 	}
-	return (nil, Ebadmsg);
+	if(int reply[0] != want)
+		return (nil, Ebadmsg);
+	return (reply[1:], nil);
+}
+
+#
+# The sealed mode.
+#
+
+cat(a, b: array of byte): array of byte
+{
+	c := array[len a + len b] of byte;
+	c[0:] = a;
+	c[len a:] = b;
+	return c;
+}
+
+readfile(name: string): string
+{
+	fd := sys->open(name, Sys->OREAD);
+	if(fd == nil)
+		fatal(sys->sprint("%s: %r", name));
+	buf := array[256] of byte;
+	n := sys->read(fd, buf, len buf);
+	if(n <= 0)
+		fatal(sys->sprint("%s: empty", name));
+	return string buf[0:n];
+}
+
+# a seed file is 32 bytes, or 64 hex digits and a newline
+readseed(name: string): array of byte
+{
+	fd := sys->open(name, Sys->OREAD);
+	if(fd == nil)
+		fatal(sys->sprint("%s: %r", name));
+	buf := array[128] of byte;
+	n := sys->read(fd, buf, len buf);
+	if(n == 32)
+		return buf[0:32];
+	if(n >= 64){
+		a := array[32] of byte;
+		for(i := 0; i < 32; i++){
+			hi := hexv(int buf[2*i]);
+			lo := hexv(int buf[2*i+1]);
+			if(hi < 0 || lo < 0)
+				fatal(name + ": not a seed file");
+			a[i] = byte ((hi<<4)|lo);
+		}
+		return a;
+	}
+	fatal(name + ": not a seed file");
+	return nil;
+}
+
+hexv(c: int): int
+{
+	if(c >= '0' && c <= '9')
+		return c-'0';
+	if(c >= 'a' && c <= 'f')
+		return c-'a'+10;
+	if(c >= 'A' && c <= 'F')
+		return c-'A'+10;
+	return -1;
+}
+
+sha256(a: array of byte): array of byte
+{
+	d := array[32] of byte;
+	crypt->sha256(a, len a, d, nil);
+	return d;
+}
+
+# expand is HKDF-Expand(prk, info, 32): one block of HMAC-SHA256
+expand(prk: array of byte, info: string): array of byte
+{
+	ipad := array[64] of {* => byte 16r36};
+	opad := array[64] of {* => byte 16r5c};
+	for(i := 0; i < len prk; i++){
+		ipad[i] ^= prk[i];
+		opad[i] ^= prk[i];
+	}
+	inner := sha256(cat(ipad, cat(array of byte info, array[1] of {byte 1})));
+	return sha256(cat(opad, inner));
+}
+
+# authenticate gets a ticket and its keys: one round trip
+authenticate(): string
+{
+	e := random->randombuf(Random->ReallyRandom, 32);
+	ephc := crypt->x25519base(e);
+	pub := crypt->ed25519pub(seed);
+	ek, dk: array of byte;
+	context := "lethe1 auth";
+	if(!classical){
+		(ek, dk) = crypt->mlkem768keygen();
+		context = "lethe2 auth";
+	}else
+		ek = array[0] of byte;
+
+	# what both the signature and the frame hold, after the context:
+	# eph_c [ek] rights prefix s[2] uname s[2] kind body s[2]
+	ub := array of byte uname;
+	m := array[32+len ek+1+(2+1)+(2+len ub)+1+(2+32)] of byte;
+	m[0:] = ephc;
+	m[32:] = ek;
+	o := 32+len ek;
+	m[o++] = byte Rread;
+	o = pstr(m, o, "/");
+	o = pstr(m, o, uname);
+	m[o++] = byte 0;	# kind 0: a bare Ed25519 public key
+	o = p16(m, o, 32);
+	m[o:] = pub;
+	signed := cat(cat(array of byte context, array[1] of {byte 0}), m);
+	sig := crypt->ed25519sign(seed, signed);
+	if(sig == nil)
+		return "cannot sign";
+
+	typ := Tauth2;
+	if(classical)
+		typ = Tauth;
+	(hdr, body, err) := exchange(typ, cat(m, sig));
+	if(err != nil)
+		return err;
+	# Rauth  = eph_s[32] nonce[24] sealed(grant)
+	# Rauth2 = eph_s[32] ct[1088] nonce[24] sealed(grant)
+	nct := 0;
+	if(!classical)
+		nct = Crypt->MLKEM768ctlen;
+	if(classical && int hdr[5] != Rauth || !classical && int hdr[5] != Rauth2)
+		return "no post-quantum key offered";
+	if(len body < 32+nct+Noncelen+Taglen)
+		return Ebadmsg;
+	ephs := body[0:32];
+	ct := body[32:32+nct];
+	nonce := body[32+nct:32+nct+Noncelen];
+	x := crypt->x25519(e, ephs);
+	zero := 1;
+	for(i := 0; i < len x; i++)
+		if(x[i] != byte 0)
+			zero = 0;
+	if(zero)
+		return "bad server key";
+	ikm := x;
+	label := "lethe1 master";
+	if(!classical){
+		k := crypt->mlkem768decap(dk, ct);
+		if(k == nil)
+			return Ebadmsg;
+		ikm = cat(k, x);	# the ML-KEM secret first
+		label = "lethe2 master";
+	}
+	transcript := cat(cat(signed, ephs), ct);
+	master := crypt->hkdfsha256(sha256(transcript), ikm, array of byte label, 32);
+	nc2s := expand(master, "lethe1 c2s");
+	ns2c := expand(master, "lethe1 s2c");
+	grant := crypt->xchachapolyopen(ns2c, nonce, cat(cat(hdr, ephs), ct), body[32+nct+Noncelen:]);
+	if(grant == nil)
+		return "bad record mac";
+	# grant = now u64 expires u64 rights u8 prefix s[2] ticket s[2]
+	if(len grant < 8+8+1+2)
+		return Ebadmsg;
+	now := g64(grant, 0);
+	(nil, p) := gstr(grant, 17);
+	if(p < 0 || p+2 > len grant)
+		return Ebadmsg;
+	n := g16(grant, p);
+	if(p+2+n != len grant)
+		return Ebadmsg;
+	ticket = grant[p+2:];
+	c2s = nc2s;
+	s2c = ns2c;
+	skew = int now - daytime->now();
+	return nil;
+}
+
+# sealed sends one request under the ticket and opens the reply
+sealed(req: array of byte): (array of byte, string)
+{
+	# plain = time u64 || request
+	plain := array[8+len req] of byte;
+	p64(plain, 0, big (daytime->now() + skew));
+	plain[8:] = req;
+	nonce := random->randombuf(Random->NotQuiteRandom, Noncelen);
+	# Treq = ticket s[2] nonce[24] seal(c2s, header || ticket, plain)
+	id := ++lid;
+	f := array[10+2+len ticket+Noncelen+len plain+Taglen] of byte;
+	p32(f, 0, len f);
+	f[4] = byte 1;
+	f[5] = byte Treq;
+	p32(f, 6, id);
+	o := p16(f, 10, len ticket);
+	f[o:] = ticket;
+	o += len ticket;
+	f[o:] = nonce;
+	o += Noncelen;
+	f[o:] = crypt->xchachapolyseal(c2s, nonce, cat(f[0:10], ticket), plain);
+	(hdr, body, err) := send(f);
+	if(err != nil)
+		return (nil, err);
+	# Rreq = nonce[24] seal(s2c, header || request nonce, reply)
+	if(int hdr[5] != Rreq || len body < Noncelen+Taglen)
+		return (nil, Ebadmsg);
+	reply := crypt->xchachapolyopen(s2c, body[0:Noncelen], cat(hdr, nonce), body[Noncelen:]);
+	if(reply == nil)
+		return (nil, "bad record mac");
+	return (reply, nil);
 }
 
 lstat(path: string): (ref Dir, string)
