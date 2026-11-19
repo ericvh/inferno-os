@@ -110,6 +110,17 @@ and whose certificate is a
 .BR pgcert2 .
 Such a key proves itself with an Ed25519 signature and an ML-DSA-65
 signature together, so that forging the proof needs a break of both.
+Purgatorio-Go writes its hybrid authinfo differently (the key with no
+marker, the signer as
+.BR pq: ,
+the certificate in base64url) and has its own layout for the request
+that carries it;
+.I lethefs
+takes that authinfo too and then speaks that layout.
+A hybrid seed file fits either: it is offered in Purgatorio's layout
+first and, to a server that calls that a bad message, in Purgatorio-Go's.
+Both are the hybrid exchange with a hybrid signature, so nothing is
+weakened by the second attempt.
 The ticket's keys come from a hybrid exchange, X25519 with ML-KEM-768, so
 that recorded traffic stays closed to someone who later breaks X25519.
 A server too old to know the hybrid exchange is given the classical one;
@@ -139,8 +150,15 @@ A list of signer keys, one to a line (64 hexadecimal digits and an optional
 comment), whose unexpired certificates for the user's name are taken.
 A hybrid signer is listed as
 .B mldsa65:
-and the 64 digits of its identifier; it vouches only for hybrid keys,
+and the 64 digits of its identifier, or as
+.B pq:
+and the 64 digits of the identifier Purgatorio-Go gives it;
+it vouches only for hybrid keys,
 and an Ed25519 signer only for Ed25519 ones.
+.I Lethed
+answers hybrid requests in Purgatorio's layout and in Purgatorio-Go's,
+which it tells apart by the kind and length of the signature; both
+are covered by the signature itself.
 .TP
 .BI -r " revoked"
 A list of revoked keys in the same form.
@@ -215,6 +233,6 @@ versions changing (devices and other synthetic files).
 .I Lethefs
 uses one connection, one request at a time.
 .br
-Purgatorio-Go's hybrid exchange has a different layout; use
-.B "-C x25519"
-with its server.
+A Purgatorio-Go server is given a classical ticket only if it is run to allow one
+.RB ( "-p hybrid,classical" );
+an Ed25519 key cannot use its hybrid exchange, which wants a hybrid signature.

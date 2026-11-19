@@ -137,6 +137,11 @@ clear := 0;
 kx := Kxdefault;
 seed: array of byte;	# the user's Ed25519 seed
 pqseed: array of byte;	# and ML-DSA-65 seed, if the key is a hybrid
+# Which Tauth2 a hybrid key goes in: Purgatorio's (kinds 2 and 3, a bare
+# signature) or Purgatorio-Go's (kinds 0 and 1, a counted signature).
+# A certificate says which by its form; a bare seed fits either.
+Lany, Lrust, Lgo: con iota;
+layout := Lany;
 proofkind := Kkey;
 proofbody: array of byte;	# the public key, or the certificate line
 uname: string;
@@ -825,6 +830,8 @@ readfile(name: string): string
 #	key <seed, 64 hex digits>		key mldsa65:<both seeds, 128 hex digits>
 #	signer <the signer's public key>	signer mldsa65:<the signer's id>
 #	pgcert1 ...				pgcert2 ...
+# or, from Purgatorio-Go, key <128 hex digits>, signer pq:<id>, and its
+# own pgcert2 (in base64url), which goes only in its own exchange.
 # With an authinfo the proof is the certificate, else the bare public key.
 readkey(name: string)
 {
@@ -852,6 +859,12 @@ readkey(name: string)
 			hybrid = 1;
 			text = text[8:];
 			tag = "pgcert2 ";
+			layout = Lrust;
+		}else if(len text == 128){
+			# Purgatorio-Go's: both seeds with no marker, and a pgcert2 in base64url
+			hybrid = 1;
+			tag = "pgcert2 ";
+			layout = Lgo;
 		}
 		for(lines = tl lines; lines != nil; lines = tl lines)
 			if(len hd lines > 8 && (hd lines)[0:8] == tag)
@@ -982,24 +995,31 @@ expand(prk: array of byte, info: string): array of byte
 # grant's seal, that it could have done it.
 authenticate(): string
 {
-	case kx {
-	Kxclassical =>
-		return getticket(1, 0);
-	Kxhybrid =>
-		e := getticket(0, 0);
-		if(e == Ebadmsg)
-			e = "no post-quantum key offered";
-		return e;
+	if(kx == Kxclassical)
+		return getticket(1, 0, 0);
+	e := Ebadmsg;
+	if(layout != Lgo)
+		e = getticket(0, 0, 0);
+	# A hybrid key that Purgatorio's Tauth2 did not suit is offered in
+	# Purgatorio-Go's. Both are the hybrid exchange with a hybrid
+	# signature, so this is a change of spelling, not a weaker choice.
+	if(e == Ebadmsg && layout != Lrust && proofkind >= Khkey){
+		e = getticket(0, 0, 1);
+		if(e == nil)
+			layout = Lgo;
 	}
-	e := getticket(0, 0);
-	if(e == Ebadmsg)
-		e = getticket(1, 1);
+	if(e == Ebadmsg){
+		if(kx == Kxhybrid || layout == Lgo)
+			e = "no post-quantum key offered";
+		else
+			e = getticket(1, 1, 0);
+	}
 	return e;
 }
 
 # getticket does one exchange: a Tauth when classical, else a Tauth2. With
 # mark set, a classical grant from a server that offers the hybrid is refused.
-getticket(classical, mark: int): string
+getticket(classical, mark, go: int): string
 {
 	e := rnd(32);
 	ephc := crypt->x25519base(e);
@@ -1021,13 +1041,22 @@ getticket(classical, mark: int): string
 	m[o++] = byte Rread;
 	o = pstr(m, o, "/");
 	o = pstr(m, o, uname);
-	m[o++] = byte proofkind;
+	if(go)
+		m[o++] = byte (proofkind - Khkey);	# its kinds count from the hybrid key
+	else
+		m[o++] = byte proofkind;
 	o = p16(m, o, len proofbody);
 	m[o:] = proofbody;
 	signed := cat(cat(array of byte context, array[1] of {byte 0}), m);
 	sig := prove(signed);
 	if(sig == nil)
 		return "cannot sign";
+	if(go){
+		# and its signature has a length
+		n := array[2] of byte;
+		p16(n, 0, len sig);
+		sig = cat(n, sig);
+	}
 
 	typ := Tauth2;
 	if(classical)
