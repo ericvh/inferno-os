@@ -161,8 +161,9 @@ dologin(c: ref Dial->Connection): string
 		return "pk name doesn't match user name";
 
 	# sign and return
-	state := kr->sha1(hisPKbuf, len hisPKbuf, nil, nil);
-	cert := kr->sign(info.mysk, userexp, state, "sha1");
+	cert := signpk(info.mysk, userexp, hisPKbuf);
+	if(cert == nil)
+		return "can't sign";
 
 	if(kr->putstring(c.dfd, kr->certtostr(cert)) < 0)
 		return sys->sprint("can't send certificate: %r");
@@ -244,3 +245,14 @@ kill(pid: int, how: string)
 	if(fd == nil || sys->fprint(fd, "%s", how) < 0)
 		sys->fprint(stderr, "logind: can't %s %d: %r\n", how, pid);
 }
+
+# the algorithms that sign bytes take sha256; the older ones keep sha1
+signpk(sk: ref Keyring->SK, expiry: int, buf: array of byte): ref Keyring->Certificate
+{
+	case sk.sa.name {
+	"ed25519" or "ed25519mldsa65" =>
+		return kr->sign(sk, expiry, kr->sha256(buf, len buf, nil, nil), "sha256");
+	}
+	return kr->sign(sk, expiry, kr->sha1(buf, len buf, nil, nil), "sha1");
+}
+

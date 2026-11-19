@@ -296,7 +296,11 @@ sigtext(role: string, T: array of byte): array of byte
 mksig(ai: ref Keyring->Authinfo, role: string, T: array of byte): array of byte
 {
 	b := sigtext(role, T);
-	c := kr->sign(ai.mysk, 0, kr->sha1(b, len b, nil, nil), "sha1");
+	c: ref Certificate;
+	if(bytesigner(ai.mysk.sa.name))
+		c = kr->sign(ai.mysk, 0, kr->sha256(b, len b, nil, nil), "sha256");
+	else
+		c = kr->sign(ai.mysk, 0, kr->sha1(b, len b, nil, nil), "sha1");
 	if(c == nil)
 		raise Fail+"can't sign";
 	return array of byte kr->certtostr(c);
@@ -305,11 +309,27 @@ mksig(ai: ref Keyring->Authinfo, role: string, T: array of byte): array of byte
 checksig(pk: ref PK, sig: array of byte, role: string, T: array of byte)
 {
 	c := kr->strtocert(string sig);
-	if(c == nil || c.ha != "sha1" && c.ha != "sha")
+	if(c == nil)
 		raise Fail+"bad signature";
 	b := sigtext(role, T);
-	if(kr->verify(pk, c, kr->sha1(b, len b, nil, nil)) == 0)
+	state: ref DigestState;
+	if(bytesigner(pk.sa.name)){
+		if(c.ha != "sha256")
+			raise Fail+"bad signature";
+		state = kr->sha256(b, len b, nil, nil);
+	}else{
+		if(c.ha != "sha1" && c.ha != "sha")
+			raise Fail+"bad signature";
+		state = kr->sha1(b, len b, nil, nil);
+	}
+	if(kr->verify(pk, c, state) == 0)
 		raise Fail+"signature does not match the exchange";
+}
+
+# the algorithms that sign bytes, and take sha256; the older ones keep sha1
+bytesigner(alg: string): int
+{
+	return alg == "ed25519" || alg == "ed25519mldsa65";
 }
 
 kdf(T, ikm: array of byte, what: string): array of byte
@@ -327,6 +347,10 @@ verify(pk: ref PK, cert: ref Certificate, buf: array of byte): int
 		state = kr->md5(buf, len buf, nil, nil);
 	"md4" =>
 		state = kr->md4(buf, len buf, nil, nil);
+	"sha256" =>
+		state = kr->sha256(buf, len buf, nil, nil);
+	"sha512" =>
+		state = kr->sha512(buf, len buf, nil, nil);
 	* =>
 		return 0;
 	}
