@@ -1,3 +1,11 @@
+// Inferno: imported from Monocypher (commit 907e90d) with these changes,
+// all for the Plan 9 compilers of the native kernels:
+// - the standard headers come through c99shim.h (in monocypher.h);
+// - #elif is written as nested #ifdef (the preprocessor has no #if);
+// - 64-bit constants carry the ULL suffix (unsuffixed ones are truncated);
+// - poly_blocks names its 32-bit products before summing, and Argon2's G
+//   is a function, because 8c aborts on the original expressions;
+// - the parameter list of Argon2's ROUND macro is on one line.
 // Monocypher version __git__
 //
 // This file is dual-licensed.  Choose whichever licence you want from
@@ -336,10 +344,16 @@ static void poly_blocks(crypto_poly1305_ctx *ctx, const u8 *in,
 		const u32 s4 =      h4 + end;
 
 		// (h + c) * r, without carry propagation
-		const u64 x0 = s0*r0+ s1*rr3+ s2*rr2+ s3*rr1+ s4*rr0;
-		const u64 x1 = s0*r1+ s1*r0 + s2*rr3+ s3*rr2+ s4*rr1;
-		const u64 x2 = s0*r2+ s1*r1 + s2*r0 + s3*rr3+ s4*rr2;
-		const u64 x3 = s0*r3+ s1*r2 + s2*r1 + s3*r0 + s4*rr3;
+		// Inferno: the 32-bit products are named, because 8c cannot
+		// compile one inside a sum of 64-bit products.
+		const u32 p0 = s4*rr0;
+		const u32 p1 = s4*rr1;
+		const u32 p2 = s4*rr2;
+		const u32 p3 = s4*rr3;
+		const u64 x0 = s0*r0+ s1*rr3+ s2*rr2+ s3*rr1+ p0;
+		const u64 x1 = s0*r1+ s1*r0 + s2*rr3+ s3*rr2+ p1;
+		const u64 x2 = s0*r2+ s1*r1 + s2*r0 + s3*rr3+ p2;
+		const u64 x3 = s0*r3+ s1*r2 + s2*r1 + s3*r0 + p3;
 		const u32 x4 =                                s4*rr4;
 
 		// partial reduction modulo 2^130 - 5
@@ -453,10 +467,10 @@ void crypto_poly1305(u8     mac[16],  const u8 *message,
 /// BLAKE2 b ///
 ////////////////
 static const u64 iv[8] = {
-	0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
-	0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-	0x510e527fade682d1, 0x9b05688c2b3e6c1f,
-	0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+	0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL,
+	0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
+	0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL,
+	0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL,
 };
 
 static void blake2b_compress(crypto_blake2b_ctx *ctx, int is_last_block)
@@ -713,13 +727,19 @@ static void extended_hash(u8       *digest, u32 digest_size,
 }
 
 #define LSB(x) ((u64)(u32)x)
-#define G(a, b, c, d)	\
-	a += b + ((LSB(a) * LSB(b)) << 1);  d ^= a;  d = rotr64(d, 32); \
-	c += d + ((LSB(c) * LSB(d)) << 1);  b ^= c;  b = rotr64(b, 24); \
-	a += b + ((LSB(a) * LSB(b)) << 1);  d ^= a;  d = rotr64(d, 16); \
-	c += d + ((LSB(c) * LSB(d)) << 1);  b ^= c;  b = rotr64(b, 63)
-#define ROUND(v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7,	\
-              v8,  v9, v10, v11, v12, v13, v14, v15)	\
+// Inferno: G is a function on locals, not a macro on array elements,
+// because 8c cannot compile the macro's expressions in place.
+static void argon_g(u64 *pa, u64 *pb, u64 *pc, u64 *pd)
+{
+	u64 a = *pa, b = *pb, c = *pc, d = *pd, t;
+	t = LSB(a) * LSB(b);  a += b + (t << 1);  d ^= a;  d = rotr64(d, 32);
+	t = LSB(c) * LSB(d);  c += d + (t << 1);  b ^= c;  b = rotr64(b, 24);
+	t = LSB(a) * LSB(b);  a += b + (t << 1);  d ^= a;  d = rotr64(d, 16);
+	t = LSB(c) * LSB(d);  c += d + (t << 1);  b ^= c;  b = rotr64(b, 63);
+	*pa = a;  *pb = b;  *pc = c;  *pd = d;
+}
+#define G(a, b, c, d)	argon_g(&(a), &(b), &(c), &(d))
+#define ROUND(v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15)	\
 	G(v0, v4,  v8, v12);  G(v1, v5,  v9, v13); \
 	G(v2, v6, v10, v14);  G(v3, v7, v11, v15); \
 	G(v0, v5, v10, v15);  G(v1, v6, v11, v12); \

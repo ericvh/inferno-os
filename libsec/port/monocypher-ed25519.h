@@ -58,8 +58,10 @@
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 namespace MONOCYPHER_CPP_NAMESPACE {
-#elif defined(__cplusplus)
+#else
+#ifdef __cplusplus
 extern "C" {
+#endif
 #endif
 
 ////////////////////////
@@ -135,8 +137,10 @@ int crypto_ed25519_ph_check(const uint8_t signature   [64],
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 }
-#elif defined(__cplusplus)
+#else
+#ifdef __cplusplus
 }
+#endif
 #endif
 
 #endif // ED25519_H
