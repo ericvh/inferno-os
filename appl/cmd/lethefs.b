@@ -1,17 +1,24 @@
 implement Lethefs;
 
 #
-# lethefs [-A] [-D] [-C x25519] [-k seedfile] [-u user] addr mtpt
+# lethefs [-A] [-D] [-N] [-C alg] [-k keyfile] [-t ms] [-u user] addr mtpt
 #
 # A Lethe client (docs/lethe.md in Purgatorio, protocol lethe1): dials a
 # lethed, and presents its read-only tree at mtpt by serving Styx on a pipe.
 # The server keeps no state; the fid table Styx needs lives here.
 #
 # With -A it uses the clear mode (Tclear/Rclear). Otherwise it authenticates
-# with the Ed25519 key whose 32-byte seed is in seedfile, gets a ticket from
-# the hybrid X25519 + ML-KEM-768 exchange (Tauth2), and seals every request
-# with XChaCha20-Poly1305. -C x25519 asks for the classical exchange (Tauth).
-# Neither mode falls back to the other.
+# with the Ed25519 key in keyfile (a 32-byte seed, or an authinfo with its
+# pgcert1 certificate), gets a ticket, and seals every request with
+# XChaCha20-Poly1305. It asks for the hybrid X25519 + ML-KEM-768 exchange
+# (Tauth2) and takes the classical one (Tauth) only from a server too old to
+# know the hybrid; -C x25519mlkem768 takes nothing else, and -C x25519 asks
+# only for the classical one. The clear and sealed modes never fall back to
+# each other.
+#
+# What it learns about a name is trusted for -t milliseconds (default 1000);
+# file data is kept in 32 KiB blocks by version and revalidated with
+# conditional reads. -N keeps no file data.
 #
 
 include "sys.m";
@@ -27,9 +34,6 @@ include "styx.m";
 include "ipints.m";
 include "crypt.m";
 	crypt: Crypt;
-include "keyring.m";
-include "security.m";
-	random: Random;
 include "daytime.m";
 	daytime: Daytime;
 
@@ -48,8 +52,21 @@ Tclear:	con 9;
 Rclear:	con 10;
 Tauth2:	con 11;
 Rauth2:	con 12;
+Treqref:	con 13;
 
 Rread:	con 1;	# rights
+Rrefs:	con 16r20;	# in a grant: the server takes ticket references
+Treflen:	con 8;
+
+# key exchanges
+Kxdefault, Kxclassical, Kxhybrid: con iota;
+
+# kinds of proof
+Kkey, Kcert, Khkey, Khcert: con iota;
+
+Maxattr:	con 8192;
+Nhash:	con 1021;
+Maxblk:	con 128;	# 4 MiB of 32 KiB blocks
 Noncelen:	con 24;
 Taglen:	con 16;
 
@@ -85,16 +102,50 @@ Fid: adt {
 	dirbuf:	array of byte;	# a directory's entries, read whole at offset 0
 };
 
+# what is known about a path, and when it was learnt
+Attr: adt {
+	path:	string;
+	d:	ref Dir;	# nil when only the qid is known
+	qid:	Qid;
+	t:	int;
+};
+
+# a block of a file's data, of one version
+Blk: adt {
+	path:	string;
+	idx:	int;
+	vers:	int;
+	data:	array of byte;
+	used:	int;
+};
+
+attrs := array[Nhash] of list of ref Attr;
+nattr := 0;
+lifetime := 1000;	# ms
+blks: list of ref Blk;
+nblk := 0;
+tick := 0;
+nodata := 0;
+
 fids: list of ref Fid;
 lfd: ref Sys->FD;	# the connection to lethed
+laddr: string;
 lid := 0;
 
 # the sealed mode's state: what an exchange gave
 clear := 0;
-classical := 0;	# -C x25519: ask for Tauth, not Tauth2
+kx := Kxdefault;
 seed: array of byte;	# the user's Ed25519 seed
+pqseed: array of byte;	# and ML-DSA-65 seed, if the key is a hybrid
+proofkind := Kkey;
+proofbody: array of byte;	# the public key, or the certificate line
 uname: string;
 ticket: array of byte;
+ticketref: array of byte;
+refsok := 0;	# the grant said the server takes references
+held := 0;	# the server has answered a request with this ticket
+rndseed: array of byte;
+rndctr := big 0;
 c2s, s2c: array of byte;
 skew := 0;	# the server's clock less ours, in seconds
 debug := 0;
@@ -113,17 +164,19 @@ init(nil: ref Draw->Context, args: list of string)
 
 	keyfile: string;
 	arg->init(args);
-	arg->setusage("lethefs [-A] [-D] [-C x25519] [-k seedfile] [-u user] addr mtpt");
+	arg->setusage("lethefs [-A] [-D] [-N] [-C alg] [-k keyfile] [-t ms] [-u user] addr mtpt");
 	while((o := arg->opt()) != 0)
 		case o {
 		'A' =>	clear = 1;
 		'D' =>	debug = 1;
 		'k' =>	keyfile = arg->earg();
 		'u' =>	uname = arg->earg();
+		'N' =>	nodata = 1;
+		't' =>	lifetime = int arg->earg();
 		'C' =>
 			case arg->earg() {
-			"x25519" =>	classical = 1;
-			"x25519mlkem768" =>	classical = 0;
+			"x25519" =>	kx = Kxclassical;
+			"x25519mlkem768" =>	kx = Kxhybrid;
 			* =>	fatal("unknown key exchange");
 			}
 		* =>	arg->usage();
@@ -135,17 +188,18 @@ init(nil: ref Draw->Context, args: list of string)
 		if(keyfile == nil)
 			fatal("no key: give -k seedfile, or -A for the clear mode");
 		crypt = load Crypt Crypt->PATH;
-		random = load Random Random->PATH;
 		daytime = load Daytime Daytime->PATH;
-		if(crypt == nil || random == nil || daytime == nil)
+		if(crypt == nil || daytime == nil)
 			fatal("cannot load crypto modules");
-		seed = readseed(keyfile);
+		readkey(keyfile);
+		rndseed = truerandom(32);
 		if(uname == nil)
 			uname = readfile("/dev/user");
 	}
 	addr := dial->netmkaddr(hd args, "tcp", "5640");
 	mtpt := hd tl args;
 
+	laddr = addr;
 	c := dial->dial(addr, nil);
 	if(c == nil)
 		fatal(sys->sprint("dial %s: %r", addr));
@@ -309,6 +363,15 @@ walk(m: ref Tmsg.Walk): ref Rmsg
 		j := i;
 		while(j < n && m.names[j] != ".." && j-i < Maxwalk)
 			j++;
+		# names learnt a moment ago cost no round trip
+		while(i < j && (a := aget(join(path, m.names[i]))) != nil){
+			path = a.path;
+			qid = a.qid;
+			qids[nq++] = qid;
+			i++;
+		}
+		if(i == j)
+			continue;
 		wq: array of Qid;
 		(wq, err) = lwalk(path, m.names[i:j]);
 		for(k := 0; k < len wq; k++){
@@ -363,10 +426,159 @@ read(m: ref Tmsg.Read): ref Rmsg
 	n := m.count;
 	if(n > Maxread)
 		n = Maxread;
-	(data, err) := lread(f.path, m.offset, n);
-	if(err != nil)
-		return rerror(m.tag, err);
-	return ref Rmsg.Read(m.tag, data);
+	if(nodata){
+		(data, nil, nil, err) := lread(f.path, m.offset, n, 0, 0);
+		if(err != nil)
+			return rerror(m.tag, err);
+		return ref Rmsg.Read(m.tag, data);
+	}
+	# The version the server last confirmed, if that was a moment ago:
+	# blocks of it are served without asking. Otherwise the first block
+	# asks (conditionally, when a copy is held) and the rest follow it.
+	have := 0;
+	vers := 0;
+	if((a := aget(f.path)) != nil){
+		have = 1;
+		vers = a.qid.vers;
+	}
+	out := array[n] of byte;
+	got := 0;
+	off := m.offset;
+	while(got < n){
+		idx := int (off / big Maxread);
+		b := bget(f.path, idx);
+		if(b == nil || !have || b.vers != vers){
+			cond := b != nil;
+			bv := 0;
+			if(cond)
+				bv = b.vers;
+			(data, qid, unchanged, err) := lread(f.path, big idx * big Maxread, Maxread, cond, bv);
+			if(err != nil){
+				if(got > 0)
+					break;
+				return rerror(m.tag, err);
+			}
+			if(!unchanged)
+				b = bput(f.path, idx, qid.vers, data);
+			have = 1;
+			vers = qid.vers;
+			aput(f.path, nil, qid);
+		}
+		b.used = ++tick;
+		bo := int (off - big idx * big Maxread);
+		c := len b.data - bo;
+		if(c > n-got)
+			c = n-got;
+		if(c > 0){
+			out[got:] = b.data[bo:bo+c];
+			got += c;
+			off += big c;
+		}
+		if(len b.data < Maxread)
+			break;	# the file ends in this block
+	}
+	return ref Rmsg.Read(m.tag, out[0:got]);
+}
+
+#
+# The caches.
+#
+
+hash(s: string): int
+{
+	h := 0;
+	for(i := 0; i < len s; i++)
+		h = h*31 + s[i];
+	return (h & 16r7fffffff) % Nhash;
+}
+
+# aget returns what is known about path, if it was learnt within the lifetime
+aget(path: string): ref Attr
+{
+	now := sys->millisec();
+	for(l := attrs[hash(path)]; l != nil; l = tl l)
+		if((hd l).path == path){
+			age := now - (hd l).t;
+			if(age >= 0 && age < lifetime)
+				return hd l;
+			return nil;
+		}
+	return nil;
+}
+
+# aput records path's entry (or only its qid, when d is nil), learnt now
+aput(path: string, d: ref Dir, qid: Qid)
+{
+	if(lifetime <= 0)
+		return;
+	now := sys->millisec();
+	h := hash(path);
+	for(l := attrs[h]; l != nil; l = tl l)
+		if((a := hd l).path == path){
+			# a qid alone confirms the entry held, if it is of that version
+			if(d != nil || a.qid.vers != qid.vers || a.qid.path != qid.path)
+				a.d = d;
+			a.qid = qid;
+			a.t = now;
+			return;
+		}
+	if(nattr >= Maxattr){
+		# full: drop what is too old to use, or everything
+		nattr = 0;
+		for(i := 0; i < Nhash; i++){
+			nl: list of ref Attr;
+			for(l = attrs[i]; l != nil; l = tl l)
+				if(now - (hd l).t < lifetime && now >= (hd l).t){
+					nl = hd l :: nl;
+					nattr++;
+				}
+			attrs[i] = nl;
+		}
+		if(nattr >= Maxattr){
+			attrs = array[Nhash] of list of ref Attr;
+			nattr = 0;
+		}
+	}
+	attrs[h] = ref Attr(path, d, qid, now) :: attrs[h];
+	nattr++;
+}
+
+bget(path: string, idx: int): ref Blk
+{
+	for(l := blks; l != nil; l = tl l)
+		if((hd l).idx == idx && (hd l).path == path)
+			return hd l;
+	return nil;
+}
+
+# bput holds a block of path at version vers, in place of any other version
+# of the file, and lets the least recently used block go when there are too many
+bput(path: string, idx, vers: int, data: array of byte): ref Blk
+{
+	nb := ref Blk(path, idx, vers, data, ++tick);
+	nl := nb :: nil;
+	n := 1;
+	oldest: ref Blk;
+	for(l := blks; l != nil; l = tl l){
+		b := hd l;
+		if(b.path == path && (b.idx == idx || b.vers != vers))
+			continue;
+		nl = b :: nl;
+		n++;
+		if(oldest == nil || b.used < oldest.used)
+			oldest = b;
+	}
+	if(n > Maxblk){
+		ol := nl;
+		nl = nil;
+		for(; ol != nil; ol = tl ol)
+			if(hd ol != oldest)
+				nl = hd ol :: nl;
+		n--;
+	}
+	blks = nl;
+	nblk = n;
+	return nb;
 }
 
 dirread(f: ref Fid, m: ref Tmsg.Read): ref Rmsg
@@ -376,6 +588,17 @@ dirread(f: ref Fid, m: ref Tmsg.Read): ref Rmsg
 		if(err != nil)
 			return rerror(m.tag, err);
 		f.dirbuf = buf;
+		# a listing says what a stat of each name would
+		for(p := 0; lifetime > 0 && p+2 <= len buf; ){
+			sz := 2 + g16(buf, p);
+			if(p+sz > len buf)
+				break;
+			(n, d) := styx->unpackdir(buf[p:p+sz]);
+			if(n != sz)
+				break;
+			aput(join(f.path, d.name), ref d, d.qid);
+			p += sz;
+		}
 	}
 	o := int m.offset;
 	if(o >= len f.dirbuf)
@@ -491,13 +714,27 @@ exchange(typ: int, body: array of byte): (array of byte, array of byte, string)
 	return send(f);
 }
 
+# send sends a frame and returns the reply's header and body. The server
+# holds nothing for the connection, so when it has gone the frame is sent
+# again on a new one, once.
 send(f: array of byte): (array of byte, array of byte, string)
 {
-	if(sys->write(lfd, f, len f) != len f)
-		return (nil, nil, sys->sprint("lethe write: %r"));
 	hdr := array[10] of byte;
-	if(readn(lfd, hdr) < 0)
-		return (nil, nil, "lethe: connection closed");
+	if(debug)
+		sys->fprint(stderr, "lethefs: send type %d, %d bytes\n", int f[5], len f);
+	if(lfd == nil || sys->write(lfd, f, len f) != len f || readn(lfd, hdr) < 0){
+		lfd = nil;
+		c := dial->dial(laddr, nil);
+		if(c == nil)
+			return (nil, nil, sys->sprint("lethe: connection lost: %r"));
+		lfd = c.dfd;
+		if(debug)
+			sys->fprint(stderr, "lethefs: dialled %s again\n", laddr);
+		if(sys->write(lfd, f, len f) != len f)
+			return (nil, nil, sys->sprint("lethe write: %r"));
+		if(readn(lfd, hdr) < 0)
+			return (nil, nil, "lethe: connection closed");
+	}
 	size := g32(hdr, 0);
 	if(size < 10 || size > Maxframe || int hdr[4] != 1 || g32(hdr, 6) != g32(f, 6))
 		return (nil, nil, Ebadmsg);
@@ -526,14 +763,21 @@ rpc(req: array of byte, want: int): (array of byte, string)
 			err = Ebadmsg;
 		reply = body;
 	}else{
-		(reply, err) = sealed(req);
+		(reply, err) = sealed(req, refsok && held);
+		if(err == "unknown ticket reference"){
+			# the server let the ticket go: send it again, once
+			held = 0;
+			(reply, err) = sealed(req, 0);
+		}
 		case err {
 		"ticket expired" or "unknown ticket key" or "bad ticket" or "request expired" =>
 			# a new ticket (and a new reading of the server's clock), once
 			err = authenticate();
 			if(err == nil)
-				(reply, err) = sealed(req);
+				(reply, err) = sealed(req, 0);
 		}
+		if(err == nil)
+			held = 1;
 	}
 	if(err != nil)
 		return (nil, err);
@@ -574,29 +818,131 @@ readfile(name: string): string
 	return string buf[0:n];
 }
 
-# a seed file is 32 bytes, or 64 hex digits and a newline
-readseed(name: string): array of byte
+# readkey reads the user's key: a seed file, or an authinfo.
+# A seed file holds an Ed25519 seed (32 bytes, or 64 hex digits and a
+# newline) or a hybrid Ed25519 + ML-DSA-65 one (64 bytes: both seeds).
+# An authinfo is three lines of text, of one kind:
+#	key <seed, 64 hex digits>		key mldsa65:<both seeds, 128 hex digits>
+#	signer <the signer's public key>	signer mldsa65:<the signer's id>
+#	pgcert1 ...				pgcert2 ...
+# With an authinfo the proof is the certificate, else the bare public key.
+readkey(name: string)
 {
 	fd := sys->open(name, Sys->OREAD);
 	if(fd == nil)
 		fatal(sys->sprint("%s: %r", name));
-	buf := array[128] of byte;
-	n := sys->read(fd, buf, len buf);
-	if(n == 32)
-		return buf[0:32];
-	if(n >= 64){
-		a := array[32] of byte;
-		for(i := 0; i < 32; i++){
-			hi := hexv(int buf[2*i]);
-			lo := hexv(int buf[2*i+1]);
-			if(hi < 0 || lo < 0)
-				fatal(name + ": not a seed file");
-			a[i] = byte ((hi<<4)|lo);
-		}
-		return a;
+	buf := array[65536] of byte;	# a pgcert2 with four signatures is 53 KB
+	n := 0;
+	while(n < len buf && (m := sys->read(fd, buf[n:], len buf - n)) > 0)
+		n += m;
+	if(n == 32 || n == 64){
+		setseed(buf[0:n], nil);
+		return;
 	}
-	fatal(name + ": not a seed file");
+	if(n < 64)
+		fatal(name + ": not a key file");
+	text := string buf[0:n];
+	cert: string;
+	hybrid := 0;
+	if(len text > 4 && text[0:4] == "key "){
+		(nil, lines) := sys->tokenize(text, "\n");
+		text = (hd lines)[4:];
+		tag := "pgcert1 ";
+		if(len text > 8 && text[0:8] == "mldsa65:"){
+			hybrid = 1;
+			text = text[8:];
+			tag = "pgcert2 ";
+		}
+		for(lines = tl lines; lines != nil; lines = tl lines)
+			if(len hd lines > 8 && (hd lines)[0:8] == tag)
+				cert = hd lines;
+		if(cert == nil)
+			fatal(name + ": authinfo without a " + tag + "certificate");
+	}
+	ns := 32;
+	if(hybrid)
+		ns = 64;
+	if(len text < 2*ns)
+		fatal(name + ": not a key file");
+	s := array[ns] of byte;
+	for(i := 0; i < ns; i++){
+		hi := hexv(text[2*i]);
+		lo := hexv(text[2*i+1]);
+		if(hi < 0 || lo < 0)
+			fatal(name + ": not a key file");
+		s[i] = byte ((hi<<4)|lo);
+	}
+	setseed(s, cert);
+}
+
+# setseed takes an Ed25519 seed (32 bytes) or a hybrid one (64), and the
+# certificate line if there is one
+setseed(s: array of byte, cert: string)
+{
+	seed = s[0:32];
+	proofkind = Kkey;
+	proofbody = crypt->ed25519pub(seed);
+	if(len s == 64){
+		pqseed = s[32:];
+		proofkind = Khkey;
+		proofbody = cat(proofbody, crypt->mldsa65pub(pqseed));
+	}
+	if(cert != nil){
+		proofkind++;	# the certificate kind follows its key kind
+		proofbody = array of byte cert;
+	}
+}
+
+# prove signs a Tauth's message with the user's key. Kinds 0 and 1 are
+# Ed25519. The hybrid kinds 2 and 3 are an Ed25519 signature and an
+# ML-DSA-65 one, each over "pghybrid1" 0 || msg: 3,373 bytes.
+prove(msg: array of byte): array of byte
+{
+	case proofkind {
+	Kkey or Kcert =>
+		return crypt->ed25519sign(seed, msg);
+	Khkey or Khcert =>
+		m := cat(array of byte "pghybrid1", cat(array[1] of {byte 0}, msg));
+		pq := crypt->mldsa65sign(pqseed, m, nil);
+		if(pq == nil)
+			return nil;
+		return cat(crypt->ed25519sign(seed, m), pq);
+	}
 	return nil;
+}
+
+# truerandom reads n bytes of /dev/random, which is slow (tens of bytes a
+# second in emu) and may return fewer than asked
+truerandom(n: int): array of byte
+{
+	fd := sys->open("/dev/random", Sys->OREAD);
+	if(fd == nil)
+		fatal(sys->sprint("/dev/random: %r"));
+	buf := array[n] of byte;
+	if(readn(fd, buf) < 0)
+		fatal(sys->sprint("/dev/random: %r"));
+	return buf;
+}
+
+# rnd gives n random bytes, for keys and nonces: SHA-256 of a seed from
+# /dev/random and a counter. The seed is replaced after each use, so what
+# was given out cannot be worked out from what is held now.
+rnd(n: int): array of byte
+{
+	out := array[n] of byte;
+	c := array[9] of byte;
+	for(o := 0; o < n; o += 32){
+		p64(c, 0, rndctr++);
+		c[8] = byte 0;
+		d := sha256(cat(rndseed, c));
+		m := n-o;
+		if(m > 32)
+			m = 32;
+		out[o:] = d[0:m];
+	}
+	c[8] = byte 1;
+	rndseed = sha256(cat(rndseed, c));
+	return out;
 }
 
 hexv(c: int): int
@@ -630,12 +976,33 @@ expand(prk: array of byte, info: string): array of byte
 	return sha256(cat(opad, inner));
 }
 
-# authenticate gets a ticket and its keys: one round trip
+# authenticate gets a ticket and its keys. By default it asks for the
+# hybrid exchange and takes the classical one only from a server that does
+# not know the hybrid ("bad lethe message") and does not say, under the
+# grant's seal, that it could have done it.
 authenticate(): string
 {
-	e := random->randombuf(Random->ReallyRandom, 32);
+	case kx {
+	Kxclassical =>
+		return getticket(1, 0);
+	Kxhybrid =>
+		e := getticket(0, 0);
+		if(e == Ebadmsg)
+			e = "no post-quantum key offered";
+		return e;
+	}
+	e := getticket(0, 0);
+	if(e == Ebadmsg)
+		e = getticket(1, 1);
+	return e;
+}
+
+# getticket does one exchange: a Tauth when classical, else a Tauth2. With
+# mark set, a classical grant from a server that offers the hybrid is refused.
+getticket(classical, mark: int): string
+{
+	e := rnd(32);
 	ephc := crypt->x25519base(e);
-	pub := crypt->ed25519pub(seed);
 	ek, dk: array of byte;
 	context := "lethe1 auth";
 	if(!classical){
@@ -647,18 +1014,18 @@ authenticate(): string
 	# what both the signature and the frame hold, after the context:
 	# eph_c [ek] rights prefix s[2] uname s[2] kind body s[2]
 	ub := array of byte uname;
-	m := array[32+len ek+1+(2+1)+(2+len ub)+1+(2+32)] of byte;
+	m := array[32+len ek+1+(2+1)+(2+len ub)+1+(2+len proofbody)] of byte;
 	m[0:] = ephc;
 	m[32:] = ek;
 	o := 32+len ek;
 	m[o++] = byte Rread;
 	o = pstr(m, o, "/");
 	o = pstr(m, o, uname);
-	m[o++] = byte 0;	# kind 0: a bare Ed25519 public key
-	o = p16(m, o, 32);
-	m[o:] = pub;
+	m[o++] = byte proofkind;
+	o = p16(m, o, len proofbody);
+	m[o:] = proofbody;
 	signed := cat(cat(array of byte context, array[1] of {byte 0}), m);
-	sig := crypt->ed25519sign(seed, signed);
+	sig := prove(signed);
 	if(sig == nil)
 		return "cannot sign";
 
@@ -703,6 +1070,9 @@ authenticate(): string
 	grant := crypt->xchachapolyopen(ns2c, nonce, cat(cat(hdr, ephs), ct), body[32+nct+Noncelen:]);
 	if(grant == nil)
 		return "bad record mac";
+	# the mark is under the seal, so only the server can have set it
+	if(mark && string nonce[Noncelen-8:] == "lethe2pq")
+		return "no post-quantum key offered";
 	# grant = now u64 expires u64 rights u8 prefix s[2] ticket s[2]
 	if(len grant < 8+8+1+2)
 		return Ebadmsg;
@@ -714,37 +1084,50 @@ authenticate(): string
 	if(p+2+n != len grant)
 		return Ebadmsg;
 	ticket = grant[p+2:];
+	ticketref = sha256(cat(cat(array of byte "lethe1 ticket ref", array[1] of {byte 0}), ticket))[0:Treflen];
+	refsok = int grant[16] & Rrefs;
+	held = 0;
 	c2s = nc2s;
 	s2c = ns2c;
 	skew = int now - daytime->now();
+	if(debug)
+		sys->fprint(stderr, "lethefs: ticket from the %s exchange, %d bytes, refs %d\n", label[0:6], len ticket, refsok != 0);
 	return nil;
 }
 
-# sealed sends one request under the ticket and opens the reply
-sealed(req: array of byte): (array of byte, string)
+# sealed sends one request under the ticket, or under its reference when
+# byref is set, and opens the reply
+#	Treq    = ticket s[2] nonce[24] seal(c2s, header || ticket, plain)
+#	Treqref = tref[8] nonce[24] seal(c2s, header || tref, plain)
+#	Rreq    = nonce[24] seal(s2c, header || request nonce, reply)
+sealed(req: array of byte, byref: int): (array of byte, string)
 {
 	# plain = time u64 || request
 	plain := array[8+len req] of byte;
 	p64(plain, 0, big (daytime->now() + skew));
 	plain[8:] = req;
-	nonce := random->randombuf(Random->NotQuiteRandom, Noncelen);
-	# Treq = ticket s[2] nonce[24] seal(c2s, header || ticket, plain)
+	nonce := rnd(Noncelen);
+	name := ticket;
+	pre := array[2] of byte;
+	p16(pre, 0, len ticket);
+	typ := Treq;
+	if(byref){
+		name = ticketref;
+		pre = array[0] of byte;
+		typ = Treqref;
+	}
 	id := ++lid;
-	f := array[10+2+len ticket+Noncelen+len plain+Taglen] of byte;
-	p32(f, 0, len f);
-	f[4] = byte 1;
-	f[5] = byte Treq;
-	p32(f, 6, id);
-	o := p16(f, 10, len ticket);
-	f[o:] = ticket;
-	o += len ticket;
-	f[o:] = nonce;
-	o += Noncelen;
-	f[o:] = crypt->xchachapolyseal(c2s, nonce, cat(f[0:10], ticket), plain);
-	(hdr, body, err) := send(f);
+	hdr := array[10] of byte;
+	p32(hdr, 0, 10+len pre+len name+Noncelen+len plain+Taglen);
+	hdr[4] = byte 1;
+	hdr[5] = byte typ;
+	p32(hdr, 6, id);
+	sl := crypt->xchachapolyseal(c2s, nonce, cat(hdr, name), plain);
+	body: array of byte;
+	err: string;
+	(hdr, body, err) = send(cat(cat(cat(cat(hdr, pre), name), nonce), sl));
 	if(err != nil)
 		return (nil, err);
-	# Rreq = nonce[24] seal(s2c, header || request nonce, reply)
 	if(int hdr[5] != Rreq || len body < Noncelen+Taglen)
 		return (nil, Ebadmsg);
 	reply := crypt->xchachapolyopen(s2c, body[0:Noncelen], cat(hdr, nonce), body[Noncelen:]);
@@ -755,6 +1138,8 @@ sealed(req: array of byte): (array of byte, string)
 
 lstat(path: string): (ref Dir, string)
 {
+	if((a := aget(path)) != nil && a.d != nil)
+		return (a.d, nil);
 	req := array[1+2+len array of byte path] of byte;
 	req[0] = byte OTstat;
 	pstr(req, 1, path);
@@ -764,28 +1149,33 @@ lstat(path: string): (ref Dir, string)
 	(n, d) := styx->unpackdir(r);
 	if(n != len r)
 		return (nil, Ebadmsg);
+	aput(path, ref d, d.qid);
 	return (ref d, nil);
 }
 
-lread(path: string, offset: big, count: int): (array of byte, string)
+# lread reads count bytes of path at offset. With cond set the caller holds
+# the data at version vers, and the reply may say unchanged in place of it.
+# It returns the data, the file's qid and whether it was unchanged.
+lread(path: string, offset: big, count: int, cond, vers: int): (array of byte, Qid, int, string)
 {
+	noqid := Qid(big 0, 0, 0);
 	req := array[1+2+len array of byte path+8+4+1+4] of byte;
 	req[0] = byte OTread;
 	o := pstr(req, 1, path);
 	o = p64(req, o, offset);
 	o = p32(req, o, count);
-	req[o++] = byte 0;	# cond: no cached copy
-	p32(req, o, 0);
+	req[o++] = byte cond;
+	p32(req, o, vers);
 	(r, err) := rpc(req, ORread);
 	if(err != nil)
-		return (nil, err);
+		return (nil, noqid, 0, err);
 	# qid[13] unchanged u8 count u32 data
 	if(len r < 13+1+4)
-		return (nil, Ebadmsg);
+		return (nil, noqid, 0, Ebadmsg);
 	n := g32(r, 14);
-	if(n < 0 || 18+n != len r)
-		return (nil, Ebadmsg);
-	return (r[18:], nil);
+	if(n < 0 || 18+n != len r || int r[13] != 0 && !cond)
+		return (nil, noqid, 0, Ebadmsg);
+	return (r[18:], gqid(r, 0), int r[13], nil);
 }
 
 # lreaddir returns every entry of a directory, as packed Styx stat entries
@@ -847,10 +1237,21 @@ lwalk(path: string, names: array of string): (array of Qid, string)
 	qids := array[nq] of Qid;
 	for(i = 0; i < nq; i++)
 		qids[i] = gqid(r, 2+13*i);
-	(ename, nil) := gstr(r, 2+13*nq);
+	(ename, eo) := gstr(r, 2+13*nq);
 	if(nq < len names && (ename == nil || ename == ""))
 		ename = "file does not exist";
 	if(nq == len names)
 		ename = nil;
+	# remember the names walked, and the last one's entry when it is there
+	p := path;
+	for(i = 0; i < nq; i++){
+		p = join(p, names[i]);
+		aput(p, nil, qids[i]);
+	}
+	if(nq == len names && nq > 0 && eo > 0 && eo < len r){
+		(sn, d) := styx->unpackdir(r[eo:]);
+		if(sn == len r - eo)
+			aput(p, ref d, d.qid);
+	}
 	return (qids, ename);
 }
