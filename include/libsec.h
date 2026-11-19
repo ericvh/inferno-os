@@ -413,6 +413,7 @@ enum
 
 void	x25519(uchar *out, uchar *secret, uchar *point);
 void	x25519base(uchar *out, uchar *secret);
+void	x25519map(uchar *out, uchar *fe);
 void	ed25519pub(uchar *pub, uchar *seed);
 void	ed25519sign(uchar *sig, uchar *seed, uchar *msg, ulong n);
 int	ed25519verify(uchar *pub, uchar *msg, ulong n, uchar *sig);

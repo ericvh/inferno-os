@@ -15,6 +15,7 @@ include "bufio.m";
 	Iobuf: import bufio;
 include "ipints.m";
 include "crypt.m";
+include "cpace.m";
 	crypt: Crypt;
 
 Crypttest: module
@@ -69,6 +70,44 @@ sha(a: array of byte): array of byte
 		return nil;
 	crypt->sha256(a, len a, d, nil);
 	return d;
+}
+
+# CPace over X25519 with SHA-512: draft-irtf-cfrg-cpace-15, appendix B.1
+cpacetest()
+{
+	cpace := load Cpace Cpace->PATH;
+	if(cpace == nil || cpace->init() != nil){
+		bad++;
+		sys->print("FAIL cannot load Cpace: %r\n");
+		return;
+	}
+	sid := unhex("7e4b4791d6a8ef019b936c79fb7f2c57");
+	ci := unhex("6f630b425f726573706f6e6465720b415f696e69746961746f72");
+	g := cpace->generator(array of byte "Password", ci, sid);
+	check("cpace generator", g, unhex("64e8099e3ea682cfdc5cb665c057ebb514d06bf23ebc9f743b51b82242327074"));
+	ya := unhex("21b4f4bd9e64ed355c3eb676a28ebedaf6d8f17bdc365995b319097153044080");
+	yb := unhex("848b0779ff415f0af4ea14df9dd1d3c29ac41d836c7808896c4eba19c51ac40a");
+	pa := cpace->share(g, ya);
+	pb := cpace->share(g, yb);
+	check("cpace Ya", pa, unhex("1b02dad6dbd29a07b6d28c9e04cb2f184f0734350e32bb7e62ff9dbcfdb63d15"));
+	check("cpace Yb", pb, unhex("20cda5955f82c4931545bcbf40758ce1010d7db4db2a907013d79c7a8fcf957f"));
+	want := unhex("a051ee5ee2499d16da3f69f430218b8ea94a18a45b67f9e86495b382c33d14a5"+
+		"c38cecc0cc834f960e39e0d1bf7d76b9ef5d54eecc5e0f386c97ad12da8c3d5f");
+	ada := array of byte "ADa";
+	adb := array of byte "ADb";
+	check("cpace ISK, initiator", cpace->isk(sid, ya, pb, pa, ada, pb, adb), want);
+	check("cpace ISK, responder", cpace->isk(sid, yb, pa, pa, ada, pb, adb), want);
+	# a share of small order must be refused (the draft's B.1.10: the neutral element and a point of order 8)
+	if(cpace->isk(sid, ya, array[32] of {* => byte 0}, pa, ada, pb, adb) == nil) ok++; else { bad++; sys->print("FAIL cpace takes the zero share\n"); }
+	if(cpace->isk(sid, ya, unhex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"), pa, ada, pb, adb) == nil) ok++; else { bad++; sys->print("FAIL cpace takes a share of order 8\n"); }
+	# the Elligator map must take every 255-bit element: one with bit 254 set, and its negation
+	fe := unhex("92806dc608984dbf4e4aae478c6ec453ae979cc01ecc1a2a7cf49f5cee56551b");
+	neg := unhex("5b7f9239f767b240b1b551b873913bac5168633fe133e5d5830b60a311a9aa64");	# p - fe
+	check("x25519map of -r", crypt->x25519map(neg), crypt->x25519map(fe));
+	hi := array[32] of byte;
+	hi[0:] = fe;
+	hi[31] |= byte 16r80;	# the top bit is ignored
+	check("x25519map ignores bit 255", crypt->x25519map(hi), crypt->x25519map(fe));
 }
 
 init(nil: ref Draw->Context, args: list of string)
@@ -127,6 +166,8 @@ init(nil: ref Draw->Context, args: list of string)
 	check("xchacha open", crypt->xchachapolyopen(key, nonce, ad, sealed), pt);
 	sealed[3] ^= byte 1;
 	if(crypt->xchachapolyopen(key, nonce, ad, sealed) == nil) ok++; else { bad++; sys->print("FAIL xchacha opens a changed message\n"); }
+
+	cpacetest();
 
 	# ML-KEM-768: ACVP vectors, then a random round trip
 	file := "/lib/crypttest/mlkem.vec";

@@ -205,6 +205,8 @@ Crypt: module
 
 	x25519:	fn(secret: array of byte, point: array of byte): array of byte;
 	x25519base:	fn(secret: array of byte): array of byte;
+	# Elligator 2: a point for a 32-byte field element (RFC 9380's map for curve25519), for CPace
+	x25519map:	fn(fe: array of byte): array of byte;
 	ed25519pub:	fn(seed: array of byte): array of byte;
 	ed25519sign:	fn(seed: array of byte, msg: array of byte): array of byte;
 	ed25519verify:	fn(pub: array of byte, msg: array of byte, sig: array of byte): int;

@@ -1408,6 +1408,21 @@ Crypt_x25519base(void *fp)
 }
 
 void
+Crypt_x25519map(void *fp)
+{
+	F_Crypt_x25519map *f;
+	uchar *s, out[X25519len];
+
+	f = fp;
+	retarray(f->ret, H);
+	s = bytes(f->fe, X25519len);
+	if(s == nil)
+		return;
+	x25519map(out, s);
+	*f->ret = mem2array(out, sizeof out);
+}
+
+void
 Crypt_ed25519pub(void *fp)
 {
 	F_Crypt_ed25519pub *f;
