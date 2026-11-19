@@ -11,6 +11,7 @@ TARG=\
 	countersigner.dis\
 	convpasswd.dis\
 	createsignerkey.dis\
+	factest.dis\
 	crypttest.dis\
 	dsagen.dis\
 	keyfs.dis\
