@@ -5,6 +5,7 @@
  */
 #include "os.h"
 #include <libsec.h>
+#define C99SHIM_HAVE_LIB9
 #include "monocypher.h"
 
 static void
