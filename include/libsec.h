@@ -389,3 +389,35 @@ int		okThumbprint(uchar *sha1, Thumbprint *ok);
 /* readcert.c */
 uchar	*readcert(char *filename, int *pcertlen);
 PEMChain *readcertchain(char *filename);
+
+/*
+ * modern primitives (libsec/port/modern.c, mlkem768.c)
+ */
+enum
+{
+	X25519len=	32,
+	Ed25519seedlen=	32,
+	Ed25519publen=	32,
+	Ed25519siglen=	64,
+	XChachakeylen=	32,
+	XChachanoncelen=	24,
+	Polytaglen=	16,
+	MLKEM768eklen=	1184,
+	MLKEM768dklen=	2400,
+	MLKEM768ctlen=	1088,
+	MLKEM768sslen=	32,
+};
+
+void	x25519(uchar *out, uchar *secret, uchar *point);
+void	x25519base(uchar *out, uchar *secret);
+void	ed25519pub(uchar *pub, uchar *seed);
+void	ed25519sign(uchar *sig, uchar *seed, uchar *msg, ulong n);
+int	ed25519verify(uchar *pub, uchar *msg, ulong n, uchar *sig);
+void	xchachapolyseal(uchar *out, uchar *key, uchar *nonce, uchar *ad, ulong nad, uchar *plain, ulong n);
+int	xchachapolyopen(uchar *out, uchar *key, uchar *nonce, uchar *ad, ulong nad, uchar *sealed, ulong n);
+int	hkdfsha256(uchar *out, ulong n, uchar *salt, ulong nsalt, uchar *ikm, ulong nikm, uchar *info, ulong ninfo);
+void	mlkem768keygen(uchar *ek, uchar *dk);
+void	mlkem768encap(uchar *ct, uchar *ss, uchar *ek);
+void	mlkem768decap(uchar *ss, uchar *ct, uchar *dk);
+void	mlkem768keygenderand(uchar *ek, uchar *dk, uchar *coins);
+void	mlkem768encapderand(uchar *ct, uchar *ss, uchar *ek, uchar *coins);
