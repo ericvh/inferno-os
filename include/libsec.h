@@ -415,6 +415,8 @@ void	ed25519sign(uchar *sig, uchar *seed, uchar *msg, ulong n);
 int	ed25519verify(uchar *pub, uchar *msg, ulong n, uchar *sig);
 void	xchachapolyseal(uchar *out, uchar *key, uchar *nonce, uchar *ad, ulong nad, uchar *plain, ulong n);
 int	xchachapolyopen(uchar *out, uchar *key, uchar *nonce, uchar *ad, ulong nad, uchar *sealed, ulong n);
+void	chachapolyseal(uchar *key, uchar *nonce, uchar *ad, ulong nad, uchar *buf, ulong n, uchar *tag);
+int	chachapolyopen(uchar *key, uchar *nonce, uchar *ad, ulong nad, uchar *buf, ulong n, uchar *tag);
 int	hkdfsha256(uchar *out, ulong n, uchar *salt, ulong nsalt, uchar *ikm, ulong nikm, uchar *info, ulong ninfo);
 void	mlkem768keygen(uchar *ek, uchar *dk);
 void	mlkem768encap(uchar *ct, uchar *ss, uchar *ek);
