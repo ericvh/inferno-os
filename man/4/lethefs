@@ -1,0 +1,66 @@
+.TH LETHEFS 4
+.SH NAME
+lethefs, lethed \- stateless read-only file service (Lethe)
+.SH SYNOPSIS
+.B lethefs
+.B -A
+[
+.B -D
+]
+.I addr
+.I mtpt
+.PP
+.B lethed
+.B -A
+[
+.B -v
+] [
+.B -a
+.I addr
+]
+.I root
+.SH DESCRIPTION
+Lethe is a file protocol for static trees in which the server keeps no state
+between requests: every request names its file by an absolute path, so a
+server can restart, or a client move to another replica, in the middle of a
+read.
+It is the protocol
+.B lethe1
+of the Purgatorio systems, with which these programs interoperate.
+.PP
+.I Lethefs
+dials the server at
+.I addr
+(default port 5640) and mounts its tree at
+.IR mtpt ,
+by serving Styx on a pipe; the fids Styx needs are kept by
+.I lethefs
+itself.
+The tree is read-only.
+.B -D
+prints the Styx messages.
+.PP
+.I Lethed
+serves the tree at
+.IR root ,
+a name in its own name space, on
+.I addr
+(default
+.BR tcp!*!5640 ).
+Requests are answered as the user
+.BR none :
+a file must be readable, and each directory above it searchable, by others.
+.PP
+Only Lethe's clear mode is implemented, which has no authentication and no
+encryption, and
+.B -A
+must be given to say so.
+Neither program falls back to it otherwise.
+.SH SOURCE
+.B /appl/cmd/lethefs.b
+.br
+.B /appl/cmd/lethed.b
+.SH BUGS
+No tickets, no sealing, and no caching in
+.IR lethefs :
+each Styx operation is one round trip or more.
