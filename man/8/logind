@@ -3,6 +3,13 @@
 logind \- login daemon
 .SH SYNOPSIS
 .B auth/logind
+[
+.B -1
+] [
+.BI -k " keydb"
+] [
+.BI -s " signerkey"
+]
 .SH DESCRIPTION
 .I Logind
 is normally started by
@@ -31,9 +38,31 @@ The client side of this exchange can be managed by the
 .B Login
 module; see
 .IR security-login (2).
+.I Logind
+speaks version 2 of that protocol.
+The
+.B -1
+option makes it serve clients that have only the original version 1 as well;
+it tells the two apart by the first byte they send.
+Version 1 protects the user's secret much less well and should be
+allowed only while such clients remain.
+.PP
+The
+.B -k
+option names the directory of users' secrets (default:
+.BR /mnt/keys ,
+where
+.IR keyfs (4)
+is normally mounted), and
+.B -s
+the signer's key file (default:
+.BR /keydb/signerkey ).
+A request for a name with no entry, or an expired one, is refused in
+the same words as one with the wrong secret; the reason is written to the console.
 .PP
 Client and server communicate over the Secure Socket Layer device
-.IR ssl (3).
+.IR ssl (3)
+once keys are agreed.
 .SH FILES
 .TF /keydb/signerkey
 .TP

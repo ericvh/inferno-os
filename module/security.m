@@ -41,6 +41,8 @@ Login: module
 	PATH:	con "/dis/lib/login.dis";
 
 	login:	fn(id, password, dest: string): (string, ref Keyring->Authinfo);
+	# the same on a connection already made; version is 2, or 1 for the original exchange
+	loginfd:	fn(version: int, id, password: string, fd: ref Sys->FD): (string, ref Keyring->Authinfo);
 };
 
 #
