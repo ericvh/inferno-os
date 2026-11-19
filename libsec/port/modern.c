@@ -4,6 +4,7 @@
  */
 #include "os.h"
 #include <libsec.h>
+#define C99SHIM_HAVE_LIB9
 #include "monocypher.h"
 #include "monocypher-ed25519.h"
 
@@ -122,4 +123,27 @@ hkdfsha256(uchar *out, ulong n, uchar *salt, ulong nsalt, uchar *ikm, ulong nikm
 	memset(prk, 0, sizeof prk);
 	memset(t, 0, sizeof t);
 	return 0;
+}
+
+/*
+ * Work areas for the imported code: see c99shim.h.
+ */
+void*
+secwork(ulong n)
+{
+	void *p;
+
+	p = mallocz(n, 1);
+	if(p == nil)
+		sysfatal("secwork: no memory");
+	return p;
+}
+
+void
+secworkfree(void *p, ulong n)
+{
+	if(p == nil)
+		return;
+	crypto_wipe(p, n);
+	free(p);
 }

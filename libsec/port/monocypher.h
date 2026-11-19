@@ -54,13 +54,14 @@
 #ifndef MONOCYPHER_H
 #define MONOCYPHER_H
 
-#include <stddef.h>
-#include <stdint.h>
+#include "c99shim.h"
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 namespace MONOCYPHER_CPP_NAMESPACE {
-#elif defined(__cplusplus)
+#else
+#ifdef __cplusplus
 extern "C" {
+#endif
 #endif
 
 // Constant time comparisons
@@ -335,8 +336,10 @@ void crypto_elligator_key_pair(uint8_t hidden[32], uint8_t secret_key[32],
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 }
-#elif defined(__cplusplus)
+#else
+#ifdef __cplusplus
 }
+#endif
 #endif
 
 #endif // MONOCYPHER_H
