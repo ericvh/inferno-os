@@ -124,6 +124,7 @@ PORTC   := alarm alloc allocb chan dev dial dis discall exception exportfs \
 	   inferno latin1 netaux netif nocache nodynld parse pgrp print proc \
 	   qio qlock random sysfile taslock xalloc \
 	   devcons devroot devenv devmnt devprog devpipe devdup devdraw devpointer devsrv devsd devtls \
+	   devssl devcap \
 	   devaudio
 
 # the native Plan 9-derived TCP/IP stack (os/ip) + #I.  Media: ether +
@@ -185,14 +186,15 @@ SECC    := des desmodes desECB desCBC des3ECB des3CBC aes blowfish idea \
 	   probably_prime smallprimetest genprime dsaprimes gensafeprime \
 	   genstrongprime rsagen rsafill rsaencrypt rsadecrypt rsaalloc \
 	   rsaprivtopub eggen egencrypt egdecrypt egalloc egprivtopub egsign \
-	   egverify dsagen dsaalloc dsaprivtopub dsasign dsaverify
+	   egverify dsagen dsaalloc dsaprivtopub dsasign dsaverify \
+	   modern chachapoly monocypher monocypher-ed25519 mlkem768 mldsa65
 
 MPC     := mpaux mpfmt strtomp mptobe mptole betomp letomp mpadd mpsub \
 	   mpcmp mpfactorial mpmul mpleft mpright mpvecadd mpvecsub \
 	   mpvecdigmuladd mpveccmp mpdigdiv mpdiv mpexp mpmod mpextendedgcd \
 	   mpinvert mprand crt mptoi mptoui mptov mptouv
 
-KRC     := dsaalg egalg rsaalg
+KRC     := dsaalg egalg rsaalg edalg
 
 # vendored mbedTLS (libmbedtls/mbedtls) for devtls, compiled freestanding
 # against ../port/mbedtls-kconfig.h + the arch's tlsshim.c (file list =
@@ -227,7 +229,8 @@ TLSINC  := -DNDEBUG -U_FORTIFY_SOURCE -DMBEDTLS_CONFIG_FILE='"mbedtls-kconfig.h"
 TKC     := ebind grids image packr panel parse utils varbl windw xdata \
 	   canvs canvu carcs cbits cimag cline coval cpoly crect ctext cwind \
 	   colrs entry extns frame buton label listb menus scale scrol \
-	   textu textw tindx tmark ttags twind
+	   textu textw tindx tmark ttags twind \
+	   after event font place thm timag ttk ttknb ttkpane ttkprog ttktree ttkwidg
 
 # (sin/floor/pow10 come from libmath now, and strtod from its dtoa.c — see MATHC)
 KERNC   := abort abs atol charstod cistrcmp cistrncmp cistrstr cleanname \
@@ -295,7 +298,7 @@ $(O)/conf.c: ../port/mkdevc $(GENCONF)
 ROOTDEPS := $(shell awk '/^root/{inroot=1;next} /^[a-z]/{inroot=0} inroot && $$1 ~ /^\// {print "$(ROOT)" $$1}' $(GENCONF) 2>/dev/null)
 
 $(GENCONF).root.h $(GENCONF).root.s &: $(GENCONF) ../port/mkroot ../port/data2s ../init/virtinit.dis $(wildcard $(ROOTDEPS))
-	mkdir -p $(ROOT)/chan $(ROOT)/dev $(ROOT)/dis $(ROOT)/env $(ROOT)/fd $(ROOT)/mnt $(ROOT)/n $(ROOT)/n/disk $(ROOT)/n/kfs $(ROOT)/n/local $(ROOT)/n/remote $(ROOT)/net $(ROOT)/prog $(ROOT)/tmp $(ROOT)/usr/inferno
+	mkdir -p $(ROOT)/chan $(ROOT)/dev $(ROOT)/dis $(ROOT)/env $(ROOT)/fd $(ROOT)/mnt $(ROOT)/mnt/factotum $(ROOT)/mnt/keys $(ROOT)/n $(ROOT)/n/disk $(ROOT)/n/kfs $(ROOT)/n/local $(ROOT)/n/remote $(ROOT)/net $(ROOT)/prog $(ROOT)/tmp $(ROOT)/usr/inferno
 	cd $(O) && AWK=awk ROOT=$(abspath $(ROOT)) INIT=virtinit DATA2S="sh $(abspath ../port/data2s)" sh ../../port/mkroot $(HWTARG).gen
 
 ../init/virtinit.dis: ../init/virtinit.b
@@ -406,8 +409,9 @@ $(O)/ma_%.o: $(ROOT)/libmath/fdlibm/%.c | $(O)
 	$(CC) $(CFLAGS) -I$(ROOT)/libmath -c -o $@ $<
 
 # libsec includes "os.h" from libmp/port (its mkfile does the same)
+# (C99SHIM_FREESTANDING: see libsec/port/c99shim.h)
 $(O)/sec_%.o: $(ROOT)/libsec/port/%.c | $(O)
-	$(CC) $(CFLAGS) -I$(ROOT)/libmp/port -c -o $@ $<
+	$(CC) $(CFLAGS) -DC99SHIM_FREESTANDING -I$(ROOT)/libmp/port -c -o $@ $<
 
 $(O)/mp_%.o: $(ROOT)/libmp/port/%.c | $(O)
 	$(CC) $(CFLAGS) -I$(ROOT)/libmp/port -c -o $@ $<

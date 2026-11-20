@@ -89,6 +89,7 @@ TARG=\
 	itest.dis\
 	itreplay.dis\
 	kill.dis\
+	exctest.dis\
 	lethed.dis\
 	lethefs.dis\
 	listen.dis\

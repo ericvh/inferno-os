@@ -10,6 +10,8 @@ dev
 	draw
 	pointer
 	ip
+	ssl
+	cap
 
 ip
 	tcp
@@ -60,6 +62,7 @@ port
 	xalloc
 
 link
+	loopbackmedium
 
 code
 	int main_pool_pcnt = 40;
@@ -84,6 +87,8 @@ root
 	/env
 	/fd
 	/mnt
+	/mnt/factotum
+	/mnt/keys
 	/n
 	/n/disk
 	/n/kfs

@@ -734,6 +734,8 @@ struct group*
 getgrnam(const char *name)
 {
 	return synth_group(name, getgid());
+}
+
 /* the kernel's generator, for emu/port/random.c */
 static int
 linuxrandom(uchar *buf, int n)

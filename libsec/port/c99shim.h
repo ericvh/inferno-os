@@ -16,6 +16,14 @@
 #ifdef _MSC_VER
 #define C99HOSTED
 #endif
+/*
+ * A native kernel built with a hosted compiler (gcc -ffreestanding) defines
+ * C99SHIM_FREESTANDING: the compiler's own <stdint.h> and <stddef.h> are
+ * there, but the string functions are the kernel's, from lib9.h.
+ */
+#ifdef C99SHIM_FREESTANDING
+#undef C99HOSTED
+#endif
 #ifdef C99HOSTED
 #include <stddef.h>
 #include <stdint.h>
@@ -24,6 +32,10 @@
 #ifndef C99SHIM_HAVE_LIB9
 #include <lib9.h>
 #endif
+#ifdef C99SHIM_FREESTANDING
+#include <stddef.h>
+#include <stdint.h>
+#else
 typedef signed char	int8_t;
 typedef unsigned char	uint8_t;
 typedef short		int16_t;
@@ -34,6 +46,7 @@ typedef long long	int64_t;
 typedef unsigned long long	uint64_t;
 #ifndef NULL
 #define NULL	((void*)0)
+#endif
 #endif
 #endif
 
