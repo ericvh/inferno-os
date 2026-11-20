@@ -9,6 +9,9 @@ getauthinfo \- obtain a certificate for authentication
 .I keyname
 .PP
 .B wm/getauthinfo
+[
+.B -1
+]
 .SH DESCRIPTION
 .I Getauthinfo
 makes contact with
