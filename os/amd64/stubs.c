@@ -169,6 +169,42 @@ hwrandomread(void *buf, ulong n)
  * Replaces libsec/port/genrandom.c (X9.17 over DES3) — real device
  * entropy beats a PRNG seeded from truerand's jitter pool.
  */
+/*
+ * RDRAND, where CPUID says the processor has it (function 1, ECX bit 30).
+ * Returns the number of bytes it gave; it may now and then have none
+ * ready, so each word is tried a few times.
+ */
+static int
+rdrandread(uchar *buf, int n)
+{
+	static int have = -1;
+	u32int ax, bx, cx, dx;
+	uvlong x;
+	uchar ok;
+	int i, j, try;
+
+	if(have < 0){
+		ax = 1;
+		cx = 0;
+		__asm__ volatile("cpuid" : "+a"(ax), "=b"(bx), "+c"(cx), "=d"(dx));
+		have = (cx >> 30) & 1;
+	}
+	if(!have)
+		return 0;
+	for(i = 0; i < n; ){
+		ok = 0;
+		for(try = 0; try < 16 && !ok; try++)
+			__asm__ volatile("rdrand %0; setc %1" : "=r"(x), "=qm"(ok));
+		if(!ok)
+			break;
+		for(j = 0; j < 8 && i < n; j++){
+			buf[i++] = x;
+			x >>= 8;
+		}
+	}
+	return i;
+}
+
 void
 genrandom(uchar *buf, int n)
 {
@@ -184,6 +220,10 @@ genrandom(uchar *buf, int n)
 		return;
 	if(got < 0)
 		got = 0;
+	/* no virtio-rng: the processor's generator, if it has one */
+	got += rdrandread(buf+got, n-got);
+	if(got >= n)
+		return;
 
 	if(state == 0){
 		/* one-time seed: device entropy if any came through, else the TSC */
