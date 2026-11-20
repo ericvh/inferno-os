@@ -9,15 +9,23 @@
 // arithmetic on unsigned ints mod 2**160, represented
 //    as 20-byte, little-endian uchar array
 
+/*
+ * 20 random bytes, four at a time. (This stored through a ulong*, which
+ * where ulong is 64 bits wrote 40 bytes into the caller's 20-byte array.)
+ */
 static void
 Hrand(uchar *s)
 {
-	ulong *u = (ulong*)s;
-	*u++ = fastrand();
-	*u++ = fastrand();
-	*u++ = fastrand();
-	*u++ = fastrand();
-	*u = fastrand();
+	ulong x;
+	int i;
+
+	for(i = 0; i < 20; i += 4){
+		x = fastrand();
+		s[i] = x;
+		s[i+1] = x>>8;
+		s[i+2] = x>>16;
+		s[i+3] = x>>24;
+	}
 }
 
 static void
