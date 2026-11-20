@@ -57,6 +57,11 @@ is normally mounted), and
 .B -s
 the signer's key file (default:
 .BR /keydb/signerkey ).
+An entry's secret is the SHA-1 digest of the password or a verifier (see
+.IR changelogin (8));
+a user with a verifier is served by version 2 only, whatever
+.B -1
+says.
 A request for a name with no entry, or an expired one, is refused in
 the same words as one with the wrong secret; the reason is written to the console.
 .PP

@@ -5,7 +5,9 @@ implement Logintest;
 # key and a password file made on the spot, for each kind of signer key.
 # A certificate that comes back is then used to authenticate with
 # Auth->client against a server holding another of the signer's
-# certificates. Prints one line for each case and a count; needs no
+# certificates. One user's entry is a verifier in place of the SHA-1 of
+# the password, and the stored entries are tried as if stolen.
+# Prints one line for each case and a count; needs no
 # network, so it runs anywhere, including a native kernel.
 #
 # usage: auth/logintest [-s] [keyalg ...]	(-s skips the 20-second silent-signer case)
@@ -32,6 +34,7 @@ Password: con "correct horse battery";
 nok, nfail: int;
 dir: string;
 alpha, p: ref Keyring->IPint;
+stolen: array of byte;	# used as the secret when run is given no password
 
 init(nil: ref Draw->Context, args: list of string)
 {
@@ -63,6 +66,18 @@ init(nil: ref Draw->Context, args: list of string)
 	kr->sha1(pw, len pw, digest, nil);
 	user("alice", digest, "never");
 	user("bob", digest, "expired");
+	# vera's entry is a verifier: enough to check her password, not to log in
+	lg := load Login Login->PATH;
+	if(lg == nil){
+		sys->print("logintest: can't load Login: %r\n");
+		raise "fail:load";
+	}
+	vera := lg->verifier("vera", digest);
+	if(vera == nil || len vera != Login->Verifierlen){
+		sys->print("logintest: can't make a verifier\n");
+		raise "fail:verifier";
+	}
+	user("vera", vera, "never");
 
 	for(; algs != nil; algs = tl algs){
 		alg := hd algs;
@@ -83,6 +98,18 @@ init(nil: ref Draw->Context, args: list of string)
 		run(alg, "version 1 refused by default", 1, "alice", Password, nil, 0, srv, "version 1 of the login protocol is not accepted");
 		run(alg, "version 1, signer given -1", 1, "alice", Password, "-1" :: nil, 0, srv, nil);
 		run(alg, "version 1, wrong password, signer given -1", 1, "alice", "incorrect horse", "-1" :: nil, 0, srv, "*");
+		run(alg, "version 2, user with a verifier only", 2, "vera", Password, nil, 0, srv, nil);
+		run(alg, "version 2, user with a verifier only, wrong password", 2, "vera", "incorrect horse", nil, 0, srv, "name or secret incorrect");
+		# (version 1 has no way to tell its client why; the signer's console says)
+		run(alg, "version 1, user with a verifier only, signer given -1", 1, "vera", Password, "-1" :: nil, 0, srv, "*");
+		# what someone who has read the signer's files can do with each kind of entry
+		stolen = digest;
+		run(alg, "version 2, alice's stored SHA-1 in place of her password", 2, "alice", nil, nil, 0, srv, nil);
+		stolen = vera[len Login->Verifiertag:len Login->Verifiertag+Keyring->SHA1dlen];
+		run(alg, "version 2, vera's stored verifier in place of her password", 2, "vera", nil, nil, 0, srv, "name or secret incorrect");
+		stolen = array[Keyring->SHA1dlen] of byte;
+		kr->sha1(vera, len vera, stolen, nil);
+		run(alg, "version 2, the SHA-1 of vera's entry in place of her password", 2, "vera", nil, nil, 0, srv, "name or secret incorrect");
 	}
 	if(silent)
 		nobody();
@@ -94,7 +121,7 @@ init(nil: ref Draw->Context, args: list of string)
 
 cleanup()
 {
-	for(l := "alice" :: "bob" :: nil; l != nil; l = tl l){
+	for(l := "alice" :: "bob" :: "vera" :: nil; l != nil; l = tl l){
 		sys->remove(dir + "/keys/" + hd l + "/secret");
 		sys->remove(dir + "/keys/" + hd l + "/expire");
 		sys->remove(dir + "/keys/" + hd l);
@@ -192,7 +219,12 @@ run(keyalg, what: string, version: int, name, password: string, dargs: list of s
 		nfail++;
 		return;
 	}
-	(err, info) := login->loginfd(version, name, password, cfd);
+	err: string;
+	info: ref Keyring->Authinfo;
+	if(password == nil)
+		(err, info) = login->loginsecret(version, name, stolen, cfd);
+	else
+		(err, info) = login->loginfd(version, name, password, cfd);
 	if(info == nil){
 		# a version 1 signer learns of a failure only when the client goes
 		cfd = nil;

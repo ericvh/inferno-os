@@ -11,6 +11,9 @@ login: fn(name, password, addr: string):
 	(string, ref Keyring->Authinfo);
 loginfd: fn(version: int, name, password: string, fd: ref Sys->FD):
 	(string, ref Keyring->Authinfo);
+loginsecret: fn(version: int, name: string, secret: array of byte,
+	fd: ref Sys->FD): (string, ref Keyring->Authinfo);
+verifier: fn(name: string, secret: array of byte): array of byte;
 .EE
 .SH DESCRIPTION
 The
@@ -98,6 +101,24 @@ does the same on a connection
 that the caller has made;
 .I version
 is 2 or 1.
+.B Loginsecret
+is
+.B loginfd
+given the 20-byte SHA-1 digest of the password in place of the password:
+the digest is all that either version makes of it.
+.PP
+.B Verifier
+returns what a certifying authority may store for
+.I name
+in place of that digest
+.RB ( Verifierlen
+bytes, starting with the text
+.BR Verifiertag ),
+or nil if
+.I secret
+is not 20 bytes.
+Version 2 can check a password against it, but it is not enough to log in; see
+.IR login (6).
 .SH SOURCE
 .B /appl/lib/login.b
 .SH SEE ALSO

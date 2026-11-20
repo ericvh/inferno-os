@@ -5,9 +5,10 @@ implement Logind;
 #
 # logind [-1] [-k keydb] [-s signerkey]
 #
-# It speaks version 2 of the login protocol (CPace with the user's
-# stored secret, beside an ML-KEM-768 exchange). With -1 it also serves
-# clients that have only version 1, the original exchange.
+# It speaks version 2 of the login protocol (CPace from the user's
+# stored secret or verifier, beside an ML-KEM-768 exchange). With -1 it
+# also serves clients that have only version 1, the original exchange,
+# for users whose entry is still the SHA-1 of the password.
 #
 
 include "sys.m";
@@ -30,6 +31,7 @@ include "dial.m";
 
 include "security.m";
 	ssl: SSL;
+	login: Login;
 
 include "daytime.m";
 	daytime: Daytime;
@@ -81,6 +83,10 @@ init(nil: ref Draw->Context, args: list of string)
 		nomod(Cpace->PATH);
 	if((e := cpace->init()) != nil)
 		fatal(e);
+
+	login = load Login Login->PATH;
+	if(login == nil)
+		nomod(Login->PATH);
 
 	arg := load Arg Arg->PATH;
 	if(arg != nil && args != nil){
@@ -225,14 +231,17 @@ dologin2(fd: ref Sys->FD, first: array of byte): string
 		raise Fail+"bad message from client";
 	id := string name;
 
-	# The user's secret. Someone with no entry, or an expired one, is led
-	# through the same exchange with a secret nobody has, to learn no
-	# more than that the name or the secret was wrong.
-	rnd := random(Noncelen+Cpace->Sharelen+Keyring->SHA1dlen);
+	# The user's verifier W: stored, or made from a stored SHA-1 of the
+	# password. Someone with no entry, or an expired one, is led through
+	# the same exchange with a verifier nobody has the key to, to learn
+	# no more than that the name or the secret was wrong.
+	rnd := random(Noncelen+Cpace->Sharelen+Keyring->SHA1dlen+32);
 	if(rnd == nil)
 		raise Fail+"can't make keys";
 	ns := rnd[0:Noncelen];
 	ys := rnd[Noncelen:Noncelen+Cpace->Sharelen];
+	nobody := rnd[Noncelen+Cpace->Sharelen:Noncelen+Cpace->Sharelen+Keyring->SHA1dlen];
+	x := rnd[Noncelen+Cpace->Sharelen+Keyring->SHA1dlen:];
 	why: string;
 	pw: array of byte;
 	userexp := 0;
@@ -245,16 +254,32 @@ dologin2(fd: ref Sys->FD, first: array of byte): string
 	else if((userexp = getexpiry(id)) < 0)
 		why = sys->sprint("expiry time for %s: %r", id);
 	if(why != nil)
-		pw = rnd[Noncelen+Cpace->Sharelen:];
-	pw = pw[0:Keyring->SHA1dlen];
+		pw = nobody;
+	# the same work whichever form is stored
+	W: array of byte;
+	if(isverifier(pw)){
+		login->verifier(id, nobody);
+		W = pw;
+	}else
+		W = login->verifier(id, pw[0:Keyring->SHA1dlen]);
+	if(W == nil || len W != Login->Verifierlen)
+		raise Fail+"can't make keys";
+	# this run's secret: a fresh key of ours with the user's
+	prs := crypt->x25519(x, W[len Login->Verifiertag:]);
+	if(prs == nil || allzero(prs)){
+		if(why == nil)
+			why = "bad verifier for "+id;
+		prs = nobody;
+	}
 
 	sid := cat(nc, ns);
-	g := cpace->generator(pw, cpace->lvcat(array of byte Label :: name :: nil), sid);
+	g := cpace->generator(prs, cpace->lvcat(array of byte Label :: name :: nil), sid);
 	ps := cpace->share(g, ys);
 	(ct, ss) := crypt->mlkem768encap(ek);
 	if(ps == nil || ct == nil || ss == nil)
 		raise Fail+"can't make keys";
 	th = putm(fd, th, 's', ns);
+	th = putm(fd, th, 's', crypt->x25519base(x));
 	th = putm(fd, th, 's', ps);
 	th = putm(fd, th, 's', ct);
 
@@ -328,6 +353,21 @@ okname(s: string): int
 		if(s[i] == '/' || s[i] <= ' ')
 			return 0;
 	return 1;
+}
+
+# an entry that is a verifier, not the SHA-1 of a password: see login(6)
+isverifier(a: array of byte): int
+{
+	t := array of byte Login->Verifiertag;
+	return len a == Login->Verifierlen && eq(a[0:len t], t);
+}
+
+allzero(a: array of byte): int
+{
+	x := 0;
+	for(i := 0; i < len a; i++)
+		x |= int a[i];
+	return x == 0;
 }
 
 kdf(T, ikm: array of byte, what: string): array of byte
@@ -498,6 +538,8 @@ dologin1(c: ref Dial->Connection): string
 		return sys->sprint("no password entry for %s: %r", s);
 	if(len pw < Keyring->SHA1dlen)
 		return "bad password for "+s+": not SHA1 hashed?";
+	if(isverifier(pw))
+		return "the entry for "+s+" serves only version 2 of the login protocol";
 	userexp := getexpiry(s);
 	if(userexp < 0)
 		return sys->sprint("expiry time for %s: %r", s);

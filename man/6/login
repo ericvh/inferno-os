@@ -13,18 +13,23 @@ later be presented to an Inferno service
 to establish credentials.
 A shared secret must previously be agreed between
 user and certifying authority (CA):
-the CA holds the 20-byte SHA-1 hash of the user's password
+the CA holds either the 20-byte SHA-1 hash of the user's password
 (see
 .IR keyfs (4)),
-which the user's side computes from the password.
+which the user's side computes from the password,
+or a
+.I verifier
+made from that hash, described below, which serves version 2 only.
 .PP
 There are two versions.
 Version 2 is spoken unless version 1 is asked for;
 neither side falls back from one to the other.
 .SS "Version 2"
-The secret is used in CPace, a balanced password-authenticated key exchange
+A secret made afresh for each run is used in CPace, a password-authenticated key exchange
 (draft-irtf-cfrg-cpace, over X25519 with SHA-512),
 run beside an ML-KEM-768 key exchange (FIPS 203).
+The fresh secret is made in the manner of AuCPace, so that the CA need hold
+nothing with which it, or someone who reads its files, could log in as the user.
 Someone who does not know the secret, whether watching the exchange
 or taking the part of user or CA, can test one guess at it for each run
 and learns nothing else about it;
@@ -40,7 +45,7 @@ user→CA	2
 CA→user	2
 .sp 1v
 user→CA	name, nonce-u[16], ML-KEM-768 encapsulation key[1184]
-CA→user	nonce-c[16], Yc[32], ML-KEM-768 ciphertext[1088]
+CA→user	nonce-c[16], X[32], Yc[32], ML-KEM-768 ciphertext[1088]
 .sp 1v
 user→CA	Yu[32], confirm-u[32]
 CA→user	confirm-c[32]
@@ -57,7 +62,7 @@ is the user's nonce followed by the CA's;
 the channel identifier is
 .B "inferno login 2"
 and the name, each preceded by its length in a byte;
-the secret (PRS) is the hash of the password;
+the secret (PRS) is the one described next;
 the CA's associated data is the text
 .B signer
 and the user's is the name.
@@ -72,6 +77,53 @@ and the CPace key
 (64 bytes) is the draft's, from
 .IR sid ,
 the X25519 result (refused if it is all zeros) and both shares.
+.PP
+The password gives its user an X25519 secret key
+.IR w :
+32 bytes of HKDF-SHA256 with no salt, the SHA-1 hash of the password as the input,
+and as the info the text
+.BR "inferno login 2 verifier" ,
+a zero byte, and the name.
+Its public key
+.I W
+is the user's verifier.
+The CA has
+.I W
+(it stores it, as the 8 bytes
+.B aucpace1
+followed by
+.IR W ;
+or it stores the SHA-1 hash and computes
+.I W
+when asked).
+For each run the CA makes a fresh X25519 key pair and sends the public key
+.IR X .
+PRS is the X25519 value both can then compute:
+the user from
+.I w
+and
+.IR X ,
+the CA from
+.I W
+and the secret key of
+.IR X ;
+an all-zero value is refused.
+To log in one must know
+.IR w ,
+which
+.I W
+does not give; a CA that stores only
+.I W
+can check a password, and someone who steals
+.I W
+can test guesses at the password against it, but neither can
+take the user's part.
+A CA that stores the SHA-1 hash has in it everything the user's side
+makes of the password.
+.PP
+This is the form of version 2 that has
+.IR X ;
+an earlier draft without it was never issued.
 .PP
 .I T
 is the SHA-256 hash of
@@ -104,7 +156,7 @@ The CA checks the user's confirmation before sending anything more;
 if it is wrong it answers with the error
 .RB `` "name or secret incorrect" ''.
 It answers a name it does not know, or one whose entry has expired,
-in the same way and at the same point, having run the exchange with a secret nobody has.
+in the same way and at the same point, having run the exchange with a verifier nobody has the key to.
 The last three lines travel in
 .B chacha20poly1305
 records of
@@ -136,6 +188,7 @@ and
 serves it only when given
 .BR -1 .
 A version 2 client that meets a CA with only version 1 gets no answer and gives up after 20 seconds.
+Version 1 needs the SHA-1 hash at the CA: a user whose entry is a verifier cannot use it.
 .PP
 A shared secret must previously be agreed between
 user and certifying authority (CA).

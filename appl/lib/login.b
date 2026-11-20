@@ -1,11 +1,16 @@
 # Inferno login: a certificate from a signer, for a password
 #
-# Version 2 (the default, see login(6)): CPace over X25519 with the
-# stored hash of the password, an ML-KEM-768 exchange beside it, keys
-# from both by HKDF-SHA256 over a hash of everything said, confirmation
-# each way, then chacha20poly1305 records for the keys and certificate.
-# Someone without the password, watching or taking either part, can test
-# one guess for each run.
+# Version 2 (the default, see login(6)): CPace over X25519, an
+# ML-KEM-768 exchange beside it, keys from both by HKDF-SHA256 over a
+# hash of everything said, confirmation each way, then chacha20poly1305
+# records for the keys and certificate. Someone without the password,
+# watching or taking either part, can test one guess for each run.
+# The secret CPace starts from is made afresh for each run, in the
+# manner of AuCPace: the signer needs only a verifier W for the user,
+# the public key of a secret key w that the password gives, and sends a
+# fresh public key X; the secret is the X25519 value both can compute,
+# the user from w and X, the signer from W and X's secret key. So what
+# the signer stores lets it check a password but not log in.
 #
 # Version 1 is the original Encrypted Key Exchange, in which the
 # signer's Diffie-Hellman value is hidden by 40-bit RC4 keyed from the
@@ -74,12 +79,27 @@ loginfd(version: int, id, password: string, fd: ref Sys->FD): (string, ref Keyri
 	kr = load Keyring Keyring->PATH;
 	if(kr == nil)
 		return nomod(Keyring->PATH);
+	pwbuf := array of byte password;
+	digest := array[Keyring->SHA1dlen] of byte;
+	kr->sha1(pwbuf, len pwbuf, digest, nil);
+	return loginsecret(version, id, digest, fd);
+}
+
+# secret is the SHA-1 of the password, all either version makes of it
+loginsecret(version: int, id: string, secret: array of byte, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
+{
+	sys = load Sys Sys->PATH;
+	kr = load Keyring Keyring->PATH;
+	if(kr == nil)
+		return nomod(Keyring->PATH);
 	ssl = load SSL SSL->PATH;
 	if(ssl == nil)
 		return nomod(SSL->PATH);
+	if(len secret != Keyring->SHA1dlen)
+		return ("bad secret", nil);
 	case version {
 	1 =>
-		return login1(id, password, fd);
+		return login1(id, secret, fd);
 	2 =>
 		;
 	* =>
@@ -96,7 +116,7 @@ loginfd(version: int, id, password: string, fd: ref Sys->FD): (string, ref Keyri
 
 	r: (string, ref Keyring->Authinfo);
 	{
-		r = login2(id, password, fd);
+		r = login2(id, secret, fd);
 	}exception ex{
 	"login fail:*" =>
 		senderrmsg(fd, what(ex));
@@ -112,13 +132,13 @@ loginfd(version: int, id, password: string, fd: ref Sys->FD): (string, ref Keyri
 #
 # c: "2"					s: "2"
 # c: name, nonce[16], ML-KEM key
-# s: nonce[16], Ys, ML-KEM ciphertext
+# s: nonce[16], X, Ys, ML-KEM ciphertext
 # c: Yc, confirmation				s: confirmation
 # then in chacha20poly1305 records:
 # s: signer's public key, alpha, p		c: user's public key
 # s: certificate
 #
-login2(id, password: string, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
+login2(id: string, secret: array of byte, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
 {
 	sendmsg(fd, array of byte "2");
 	v := string firstmsg(fd);
@@ -138,15 +158,20 @@ login2(id, password: string, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
 	th = putm(fd, th, 'c', nc);
 	th = putm(fd, th, 'c', ek);
 
-	ns, ys, ct: array of byte;
+	ns, x, ys, ct: array of byte;
 	(th, ns) = getm(fd, th, 's');
+	(th, x) = getm(fd, th, 's');
 	(th, ys) = getm(fd, th, 's');
 	(th, ct) = getm(fd, th, 's');
-	if(len ns != Noncelen || len ys != Cpace->Sharelen || len ct != Ctlen)
+	if(len ns != Noncelen || len x != 32 || len ys != Cpace->Sharelen || len ct != Ctlen)
 		raise Fail+"bad message from signer";
 
+	# this run's secret: ours with the signer's fresh key
+	prs := crypt->x25519(wkey(id, secret), x);
+	if(prs == nil || allzero(prs))
+		raise Fail+"bad key exchange value";
 	sid := cat(nc, ns);
-	g := cpace->generator(prs(password), cpace->lvcat(array of byte Label :: name :: nil), sid);
+	g := cpace->generator(prs, cpace->lvcat(array of byte Label :: name :: nil), sid);
 	pc := cpace->share(g, yc);
 	th = putm(fd, th, 'c', pc);
 	T := array[Keyring->SHA256dlen] of byte;
@@ -207,13 +232,40 @@ login2(id, password: string, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
 	return (nil, info);
 }
 
-# the stored form of a password: its SHA-1, as keyfs(4) holds it
-prs(password: string): array of byte
+# the X25519 secret key the password gives its user: HKDF-SHA256 of
+# the password's SHA-1, with the user's name
+wkey(id: string, secret: array of byte): array of byte
 {
-	pwbuf := array of byte password;
-	digest := array[Keyring->SHA1dlen] of byte;
-	kr->sha1(pwbuf, len pwbuf, digest, nil);
-	return digest;
+	l := array of byte (Label + " verifier");
+	n := array of byte id;
+	info := array[len l + 1 + len n] of byte;
+	info[0:] = l;
+	info[len l] = byte 0;
+	info[len l + 1:] = n;
+	return crypt->hkdfsha256(nil, secret, info, 32);
+}
+
+# what a signer keeps to recognise that key's holder: a tag, and its public key
+verifier(id: string, secret: array of byte): array of byte
+{
+	if(sys == nil)
+		sys = load Sys Sys->PATH;
+	if(crypt == nil)
+		crypt = load Crypt Crypt->PATH;
+	if(crypt == nil || len secret != Keyring->SHA1dlen)
+		return nil;
+	w := wkey(id, secret);
+	if(w == nil)
+		return nil;
+	return cat(array of byte Verifiertag, crypt->x25519base(w));
+}
+
+allzero(a: array of byte): int
+{
+	x := 0;
+	for(i := 0; i < len a; i++)
+		x |= int a[i];
+	return x == 0;
 }
 
 certifies(pk: ref Keyring->PK, cert: ref Keyring->Certificate, buf: array of byte): int
@@ -431,7 +483,7 @@ addmsg(th: ref Keyring->DigestState, who: int, m: array of byte): ref Keyring->D
 # held by Lucent Technologies Inc.  Its use outside Inferno
 # requires a separate licence from Lucent.
 #
-login1(id, password: string, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
+login1(id: string, digest: array of byte, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
 {
 	# push ssl, leave in clear mode for now
 	(err, c) := ssl->connect(fd);
@@ -458,10 +510,7 @@ login1(id, password: string, fd: ref Sys->FD): (string, ref Keyring->Authinfo)
 		return (sys->sprint("can't send initialization vector: %r"), nil);
 
 	# start encrypting
-	pwbuf := array of byte password;
-	digest := array[Keyring->SHA1dlen] of byte;
-	kr->sha1(pwbuf, len pwbuf, digest, nil);
-	pwbuf = array[8] of byte;
+	pwbuf := array[8] of byte;
 	for(i := 0; i < 8; i++)
 		pwbuf[i] = digest[i] ^ digest[8+i];
 	for(i = 0; i < 4; i++)
