@@ -293,6 +293,10 @@ signer(fd: ref Sys->FD, dargs: list of string, done: chan of int)
 		sys->print("logintest: can't load logind: %r\n");
 	else
 		logind->init(nil, "logind" :: "-k" :: dir + "/keys" :: "-s" :: dir + "/signerkey" :: dargs);
+	# a signer that gives up says so by hanging up: let go of the connection
+	# now, as its process ending would, whatever is still awaiting collection
+	logind = nil;
+	sys->pctl(Sys->NEWFD, 2 :: nil);
 	done <-= 1;
 }
 
