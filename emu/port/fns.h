@@ -182,6 +182,7 @@ void		qunlock(QLock*);
 int		qwindow(Queue*);
 int		qwrite(Queue*, void*, int);
 ulong	randomread(void *xp, ulong n);
+extern int	(*hostrandom)(uchar*, int);
 void	randominit(void);
 int		readkbd(void);
 int		readnum(ulong, char*, ulong, ulong, int);
