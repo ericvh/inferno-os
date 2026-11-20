@@ -60,7 +60,6 @@ TARG=\
 	dossrv.dis\
 	du.dis\
 	echo.dis\
-	exctest.dis\
 	ed.dis\
 	emuinit.dis\
 	env.dis\

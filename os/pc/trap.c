@@ -299,7 +299,6 @@ trap(Ureg* ureg)
 		}
 	}
 	else if(vno <= nelem(excname) && up->type == Interp){
-		comptrap(ureg->pc, ureg->si);	/* for handler(), if in compiled Dis */
 		spllo();
 		sprint(buf, "sys: trap: %s", excname[vno]);
 		error(buf);
@@ -524,10 +523,8 @@ fault386(Ureg* ureg, void*)
 	spllo();
 	snprint(buf, sizeof(buf), "trap: fault %s pc=0x%lux addr=0x%lux",
 			read ? "read" : "write", ureg->pc, addr);
-	if(up->type == Interp){
-		comptrap(ureg->pc, ureg->si);	/* for handler(), if in compiled Dis */
+	if(up->type == Interp)
 		disfault(ureg, buf);
-	}
 	dumpregs(ureg);
 	panic("fault: %s\n", buf);
 }

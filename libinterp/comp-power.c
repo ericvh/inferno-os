@@ -261,7 +261,6 @@ static void
 rmcall(void)
 {
 	Frame *f;
-	Inst *lr;
 	Prog *p;
 
 	if((void*)R.dt == H)
@@ -272,7 +271,6 @@ rmcall(void)
 		error(exModule);
 
 	f->mr = nil;
-	lr = f->lr;
 	((void(*)(Frame*))R.dt)(f);
 	R.SP = (uchar*)f;
 	R.FP = f->fp;
@@ -281,11 +279,8 @@ rmcall(void)
 	else
 		freeptrs(f, f->t);
 	p = currun();
-	if(p->kill != nil){
-		/* as comp-386.c: handler() wants the pc of the call in R.PC */
-		R.PC = lr;
+	if(p->kill != nil)
 		error(p->kill);
-	}
 }
 
 static void
