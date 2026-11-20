@@ -9,6 +9,7 @@ int	cistrncmp(char*, char*, int);
 void	clockintr(Ureg*, void*);
 void	(*coherence)(void);
 void	cpuid(char*, int*, int*);
+int	comptrap(ulong, ulong);
 int	cpuidentify(void);
 ulong	cpuidcx(void);
 int	rdrand32(ulong*);
